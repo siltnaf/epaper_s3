@@ -139,6 +139,7 @@ static bool portraitPointFromTouch(int16_t tx, int16_t ty, int32_t *px, int32_t 
 static bool touchHitsPortraitRect(int16_t tx, int16_t ty, int32_t rx, int32_t ry, int32_t rw, int32_t rh);
 static bool handleSettingsTouch(int16_t tx, int16_t ty);
 static bool touchHitsSettingsTile(int16_t tx, int16_t ty);
+static bool touchHitsWifiStatusIcon(int16_t tx, int16_t ty);
 
 static const uint8_t clockIcon50x50[] = {
     0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
@@ -547,20 +548,21 @@ static void drawSettingsIcon(int32_t x, int32_t y, int32_t size)
     int32_t cx = x + size / 2;
     int32_t cy = y + size / 2;
 
-    // Gear teeth around the outer ring.
-    portraitFillRect(cx - 8, y + 14, 16, 24, 0x00);
-    portraitFillRect(cx - 8, y + size - 38, 16, 24, 0x00);
-    portraitFillRect(x + 14, cy - 8, 24, 16, 0x00);
-    portraitFillRect(x + size - 38, cy - 8, 24, 16, 0x00);
-    portraitFillRect(x + 24, y + 24, 18, 18, 0x00);
-    portraitFillRect(x + size - 42, y + 24, 18, 18, 0x00);
-    portraitFillRect(x + 24, y + size - 42, 18, 18, 0x00);
-    portraitFillRect(x + size - 42, y + size - 42, 18, 18, 0x00);
+    // Gear teeth outlines (top, bottom, left, right) - thinnest line as possible
+    portraitDrawRect(cx - 8, y + 14, 16, 11, 0x00);
+    portraitDrawRect(cx - 8, y + size - 25, 16, 11, 0x00);
+    portraitDrawRect(x + 14, cy - 8, 11, 16, 0x00);
+    portraitDrawRect(x + size - 25, cy - 8, 11, 16, 0x00);
 
-    // Solid outer gear and white center hole, matching a simple black settings icon.
-    portraitFillCircle(cx, cy, 34, 0x00);
-    portraitFillCircle(cx, cy, 15, 0xFF);
-    portraitDrawCircle(cx, cy, 16, 0x00);
+    // Diagonal teeth outlines
+    portraitDrawRect(x + 22, y + 22, 12, 12, 0x00);
+    portraitDrawRect(x + size - 34, y + 22, 12, 12, 0x00);
+    portraitDrawRect(x + 22, y + size - 34, 12, 12, 0x00);
+    portraitDrawRect(x + size - 34, y + size - 34, 12, 12, 0x00);
+
+    // Gear outer and inner ring outlines
+    portraitDrawCircle(cx, cy, 34, 0x00);
+    portraitDrawCircle(cx, cy, 15, 0x00);
 }
 
 static void drawPortraitStartup()
@@ -646,15 +648,15 @@ static void drawSettingsScreen()
             drawPortraitTextInRect("Enter Password...", 44, 150, 452, 60, (GFXfont *)&FiraSans);
         }
 
-        // CONNECT button with custom 1bpp connect icon
-        int32_t connectIconX = 34 + (226 - 60) / 2;
-        int32_t connectIconY = 230 + (60 - 60) / 2;
-        drawScaledBitmapIcon1bpp(connectIconX, connectIconY, 60, 60, wifi_connect_icon_60x60, 1, 0x00);
+        // CONNECT button (Outline and thin lines only)
+        portraitDrawRect(34, 230, 226, 60, 0x00);
+        portraitDrawRect(37, 233, 220, 54, 0x00);
+        drawPortraitTextInRectCentered("CONNECT", 34, 230, 226, 60, (GFXfont *)&FiraSans);
 
-        // CANCEL button with custom 1bpp cancel icon
-        int32_t cancelIconX = 280 + (226 - 60) / 2;
-        int32_t cancelIconY = 230 + (60 - 60) / 2;
-        drawScaledBitmapIcon1bpp(cancelIconX, cancelIconY, 60, 60, wifi_cancel_icon_60x60, 1, 0x00);
+        // CANCEL button (Outline and thin lines only)
+        portraitDrawRect(280, 230, 226, 60, 0x00);
+        portraitDrawRect(283, 233, 220, 54, 0x00);
+        drawPortraitTextInRectCentered("CANCEL", 280, 230, 226, 60, (GFXfont *)&FiraSans);
 
         // Draw keyboard in the lower half of the portrait screen.  The first
         // row is a dedicated number row, followed by three letter/symbol rows
@@ -679,27 +681,8 @@ static void drawSettingsScreen()
             int y = wifiKeyboardRowY(WIFI_KBD_NUMERIC_ROW);
             portraitDrawRect(x, y, keyW, keyH, 0x00);
 
-            const uint8_t *icon_ptr = NULL;
-            switch (ch) {
-                case '0': icon_ptr = calc_key_icon_0; break;
-                case '1': icon_ptr = calc_key_icon_1; break;
-                case '2': icon_ptr = calc_key_icon_2; break;
-                case '3': icon_ptr = calc_key_icon_3; break;
-                case '4': icon_ptr = calc_key_icon_4; break;
-                case '5': icon_ptr = calc_key_icon_5; break;
-                case '6': icon_ptr = calc_key_icon_6; break;
-                case '7': icon_ptr = calc_key_icon_7; break;
-                case '8': icon_ptr = calc_key_icon_8; break;
-                case '9': icon_ptr = calc_key_icon_9; break;
-            }
-            if (icon_ptr != NULL) {
-                int32_t iconX = x + (keyW - CALC_KEY_ICON_W) / 2;
-                int32_t iconY = y + (keyH - CALC_KEY_ICON_H) / 2;
-                drawScaledBitmapIcon1bpp(iconX, iconY, CALC_KEY_ICON_W, CALC_KEY_ICON_H, icon_ptr, 1, 0x00);
-            } else {
-                char label[2] = {ch, '\0'};
-                drawPortraitTextInRect(label, x, y, keyW, keyH, (GFXfont *)&FiraSans);
-            }
+            char label[2] = {ch, '\0'};
+            drawPortraitTextInRectCentered(label, x, y, keyW, keyH, (GFXfont *)&FiraSans);
         }
 
         for (int r = 0; r < 3; ++r) {
@@ -708,59 +691,13 @@ static void drawSettingsScreen()
                 char ch = current_kb[r][c];
                 int x = startX + c * keyW;
                 
-                // Draw keyboard letter keys using the 50x50 icon if we are in lowercase/uppercase modes and it's a letter (a-z, A-Z)
-                bool is_letter = (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z');
-                if (is_letter) {
-                    char lower_ch = (ch >= 'A' && ch <= 'Z') ? (ch - 'A' + 'a') : ch;
-                    const uint8_t *icon_ptr = NULL;
-                    switch (lower_ch) {
-                        case 'a': icon_ptr = wifi_kbd_a_key_icon; break;
-                        case 'b': icon_ptr = wifi_kbd_b_key_icon; break;
-                        case 'c': icon_ptr = wifi_kbd_c_key_icon; break;
-                        case 'd': icon_ptr = wifi_kbd_d_key_icon; break;
-                        case 'e': icon_ptr = wifi_kbd_e_key_icon; break;
-                        case 'f': icon_ptr = wifi_kbd_f_key_icon; break;
-                        case 'g': icon_ptr = wifi_kbd_g_key_icon; break;
-                        case 'h': icon_ptr = wifi_kbd_h_key_icon; break;
-                        case 'i': icon_ptr = wifi_kbd_i_key_icon; break;
-                        case 'j': icon_ptr = wifi_kbd_j_key_icon; break;
-                        case 'k': icon_ptr = wifi_kbd_k_key_icon; break;
-                        case 'l': icon_ptr = wifi_kbd_l_key_icon; break;
-                        case 'm': icon_ptr = wifi_kbd_m_key_icon; break;
-                        case 'n': icon_ptr = wifi_kbd_n_key_icon; break;
-                        case 'o': icon_ptr = wifi_kbd_o_key_icon; break;
-                        case 'p': icon_ptr = wifi_kbd_p_key_icon; break;
-                        case 'q': icon_ptr = wifi_kbd_q_key_icon; break;
-                        case 'r': icon_ptr = wifi_kbd_r_key_icon; break;
-                        case 's': icon_ptr = wifi_kbd_s_key_icon; break;
-                        case 't': icon_ptr = wifi_kbd_t_key_icon; break;
-                        case 'u': icon_ptr = wifi_kbd_u_key_icon; break;
-                        case 'v': icon_ptr = wifi_kbd_v_key_icon; break;
-                        case 'w': icon_ptr = wifi_kbd_w_key_icon; break;
-                        case 'x': icon_ptr = wifi_kbd_x_key_icon; break;
-                        case 'y': icon_ptr = wifi_kbd_y_key_icon; break;
-                        case 'z': icon_ptr = wifi_kbd_z_key_icon; break;
-                    }
-                    if (icon_ptr != NULL) {
-                        // The icons are 50x50, perfectly centered inside 52x60 key cells.
-                        // Let's draw it without the grid line!
-                        int32_t iconX = x + (keyW - 50) / 2;
-                        int32_t iconY = y + (keyH - 50) / 2;
-                        drawScaledBitmapIcon1bpp(iconX, iconY, 50, 50, icon_ptr, 1, 0x00);
+                portraitDrawRect(x, y, keyW, keyH, 0x00);
+                if (ch != '\0') {
+                    char label[2] = {ch, '\0'};
+                    if (ch == '<') {
+                        drawPortraitTextInRectCentered("<-", x, y, keyW, keyH, (GFXfont *)&FiraSans);
                     } else {
-                        portraitDrawRect(x, y, keyW, keyH, 0x00);
-                        char label[2] = {ch, '\0'};
-                        drawPortraitTextInRect(label, x, y, keyW, keyH, (GFXfont *)&FiraSans);
-                    }
-                } else {
-                    portraitDrawRect(x, y, keyW, keyH, 0x00);
-                    if (ch != '\0') {
-                        char label[2] = {ch, '\0'};
-                        if (ch == '<') {
-                            drawPortraitTextInRect("<-", x, y, keyW, keyH, (GFXfont *)&FiraSans);
-                        } else {
-                            drawPortraitTextInRect(label, x, y, keyW, keyH, (GFXfont *)&FiraSans);
-                        }
+                        drawPortraitTextInRectCentered(label, x, y, keyW, keyH, (GFXfont *)&FiraSans);
                     }
                 }
             }
@@ -977,32 +914,30 @@ static void drawPortraitHome()
     const int32_t startX = homeIconStartX();
     const int32_t startY = HOME_ICON_START_Y;
 
-    for (int row = 0; row < 2; ++row) {
-        for (int col = 0; col < 3; ++col) {
-            int32_t x = startX + col * (icon + gap);
-            int32_t y = startY + row * 210;
-            portraitDrawRect(x, y, icon, icon, 0x00);
-            portraitDrawRect(x + 8, y + 8, icon - 16, icon - 16, 0x00);
-        }
-    }
-
-    // Simple recognisable portrait-mode icons: settings, calculator, clock.
+    // Simple recognisable portrait-mode icons: settings, calculator, clock (Thin outlines, no fill)
     int32_t sx = startX;
     int32_t sy = startY;
     drawSettingsIcon(sx, sy, icon);
 
     int32_t cx = startX + icon + gap;
     int32_t cy = startY;
-    portraitFillRect(cx + 28, cy + 24, 62, 18, 0x00);
+    // Calculator Icon (Outline, no fill)
+    portraitDrawRect(cx + 28, cy + 24, 62, 18, 0x00);
     for (int r = 0; r < 3; ++r) {
         for (int c = 0; c < 3; ++c) {
-            portraitFillRect(cx + 28 + c * 24, cy + 54 + r * 18, 14, 10, 0x00);
+            portraitDrawRect(cx + 28 + c * 24, cy + 54 + r * 18, 14, 10, 0x00);
         }
     }
 
     int32_t kx = startX + (icon + gap) * 2;
     int32_t ky = startY;
-    drawScaledBitmapIcon1bpp(kx + 9, ky + 9, 50, 50, clockIcon50x50, 2, 0x00);
+    // Clock Icon (Outline, thinnest line as possible, no fill)
+    int32_t clock_cx = kx + 59;
+    int32_t clock_cy = ky + 59;
+    portraitDrawCircle(clock_cx, clock_cy, 45, 0x00);
+    portraitDrawCircle(clock_cx, clock_cy, 2, 0x00);
+    portraitDrawLine(clock_cx, clock_cy, clock_cx - 15, clock_cy - 12, 0x00); // Hour hand
+    portraitDrawLine(clock_cx, clock_cy, clock_cx + 25, clock_cy - 15, 0x00); // Minute hand
 
     portraitDrawRect((PORTRAIT_WIDTH - 180) / 2, PORTRAIT_HEIGHT - 150, 180, 70, 0x00);
 }
@@ -1066,7 +1001,8 @@ static void drawCalculatorScreen()
         const CalcButton &b = calcButtons[i];
         portraitDrawRect(b.x, b.y, b.w, b.h, 0x00);
         portraitDrawRect(b.x + 3, b.y + 3, b.w - 6, b.h - 6, 0x00);
-        drawCalcKeyIconCentered(b);
+        // Draw crisp thinnest-possible vector text for all calculator keys
+        drawPortraitTextInRectCentered(b.label, b.x, b.y, b.w, b.h, (GFXfont *)&FiraSans);
     }
 }
 
@@ -1207,7 +1143,8 @@ static void refreshCalculatorResultArea(const char *previousExpression)
         return;
     }
     epd_poweron();
-    epd_clear_area(area);
+    // Wipe once with white color to clear previous characters cleanly, then draw the text once to maintain perfect solid black and crisp white (steady color, no graying)
+    epd_push_pixels(area, 50, 1);
     epd_draw_grayscale_image(area, areaBuffer);
     epd_poweroff();
     free(areaBuffer);
@@ -1402,9 +1339,22 @@ static bool handleCalculatorTouchLegacy(int16_t tx, int16_t ty)
 static void refreshDisplay(void (*drawFn)())
 {
     epd_poweron();
-    epd_clear();
+    // Use the same method as wiping the startup screen to transition between pages (avoiding blackout)
+    // We target only the area below the top status bar (y >= 56) to keep the status bar static.
+    Rect_t area = portraitRectToPhysicalRect(0, 56, PORTRAIT_WIDTH, PORTRAIT_HEIGHT - 56);
+    
+    // Give 3 white pulses to clear the old data before drawing the new page
+    for (int i = 0; i < 3; i++) {
+        epd_push_pixels(area, 50, 1);
+    }
+    
     drawFn();
-    epd_draw_grayscale_image(epd_full_screen(), framebuffer);
+    
+    uint8_t *areaBuffer = copyPhysicalAreaFromFramebuffer(area);
+    if (areaBuffer) {
+        epd_draw_grayscale_image(area, areaBuffer); // Draw target data
+        free(areaBuffer);
+    }
     epd_poweroff();
 }
 
@@ -1462,6 +1412,12 @@ static bool touchHitsSettingsTile(int16_t tx, int16_t ty)
 {
     const int32_t settingsX = homeIconStartX();
     return touchHitsPortraitRect(tx, ty, settingsX, HOME_ICON_START_Y, HOME_ICON_SIZE, HOME_ICON_SIZE);
+}
+
+static bool touchHitsWifiStatusIcon(int16_t tx, int16_t ty)
+{
+    // Tap area centered on the top status bar's WiFi icon (PORTRAIT_WIDTH - 136, y = 10)
+    return touchHitsPortraitRect(tx, ty, PORTRAIT_WIDTH - 150, 0, 70, 56);
 }
 
 struct _point {
@@ -1577,7 +1533,10 @@ void setup()
     delay(3000);
 
     epd_poweron();
-    epd_clear();
+    // Wipe out "Asundar" with white color. To prevent/remove any ghost image, we do multiple white wipes (pulses) to thoroughly clear the screen without doing a harsh black flash.
+    for (int i = 0; i < 3; i++) {
+        epd_push_pixels(epd_full_screen(), 50, 1);
+    }
 
 #if defined(CONFIG_IDF_TARGET_ESP32S3)
     // Assuming that the previous touch was in sleep state, wake it up
@@ -1703,7 +1662,9 @@ void loop()
                 return;
             }
 
-            if (!showingClock && !showingCalculator && !showingSettings && touchHitsSettingsTile(x, y)) {
+            if (!showingSettings && touchHitsWifiStatusIcon(x, y)) {
+                showingClock = false;
+                showingCalculator = false;
                 showingSettings = true;
                 show_password_prompt = false;
                 kb_mode = KB_LOWERCASE;
