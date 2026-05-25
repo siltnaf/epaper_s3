@@ -100,9 +100,9 @@ const char keyboard_uppercase[3][10] = {
 };
 
 const char keyboard_symbols[3][10] = {
-    {'1', '2', '3', '4', '5', '6', '7', '8', '9', '0'},
     {'-', '/', ':', ';', '(', ')', '$', '&', '*', '<'},
-    {'+', '=', '%', '?', '!', '#', ',', '"', '\'', '\\'}
+    {'+', '=', '%', '?', '!', '#', ',', '"', '\'', '\\'},
+    {'~', '`', '|', '^', '[', ']', '{', '}', '.', '@'}
 };
 uint32_t clock_refresh_interval = 0;
 uint32_t auto_refresh_interval = 0;
@@ -135,6 +135,9 @@ static void drawCalculatorScreen();
 static void drawSettingsScreen();
 static void drawWifiScanningScreen();
 static void refreshDisplay(void (*drawFn)());
+static void drawWifiPasswordInputBox();
+static void refreshWifiPasswordArea();
+static void refreshWifiKeyboardArea();
 static bool pointInRect(int32_t px, int32_t py, int32_t rx, int32_t ry, int32_t rw, int32_t rh);
 static bool portraitPointFromTouch(int16_t tx, int16_t ty, int32_t *px, int32_t *py, bool alternate);
 static bool touchHitsPortraitRect(int16_t tx, int16_t ty, int32_t rx, int32_t ry, int32_t rw, int32_t rh);
@@ -204,6 +207,11 @@ static const int32_t WIFI_KBD_GAP_Y = 5;
 static const int32_t WIFI_KBD_NUMERIC_ROW = 0;
 static const int32_t WIFI_KBD_LETTER_ROW_START = 1;
 static const int32_t WIFI_KBD_ACTION_ROW = 4;
+static const int32_t TOP_STATUS_BAR_H = 56;
+static const int32_t WIFI_PASSWORD_BOX_X = 34;
+static const int32_t WIFI_PASSWORD_BOX_Y = 150;
+static const int32_t WIFI_PASSWORD_BOX_W = 472;
+static const int32_t WIFI_PASSWORD_BOX_H = 60;
 
 static const char wifi_keyboard_numbers[10] = {'1', '2', '3', '4', '5', '6', '7', '8', '9', '0'};
 
@@ -375,7 +383,7 @@ static void drawBatteryStatusIcon(int32_t x, int32_t y, uint8_t sections, uint8_
 static void drawTopStatusBar()
 {
     const int32_t barY = 0;
-    const int32_t barH = 56;
+    const int32_t barH = TOP_STATUS_BAR_H;
     // Don't fill with black color; instead keep the background white/clear (0xFF)
     portraitFillRect(0, barY, PORTRAIT_WIDTH, barH, 0xFF);
 
@@ -689,6 +697,21 @@ static void drawWifiScanningScreen()
     drawWifiScanningScreenSingleWidth("Scanning WiFi...", 400, (GFXfont *)&FiraSans);
 }
 
+static void drawWifiPasswordInputBox()
+{
+    portraitFillRect(WIFI_PASSWORD_BOX_X, WIFI_PASSWORD_BOX_Y, WIFI_PASSWORD_BOX_W, WIFI_PASSWORD_BOX_H, 0xFF);
+    portraitDrawRect(WIFI_PASSWORD_BOX_X, WIFI_PASSWORD_BOX_Y, WIFI_PASSWORD_BOX_W, WIFI_PASSWORD_BOX_H, 0x00);
+    portraitDrawRect(WIFI_PASSWORD_BOX_X + 1, WIFI_PASSWORD_BOX_Y + 1, WIFI_PASSWORD_BOX_W - 2, WIFI_PASSWORD_BOX_H - 2, 0x00);
+
+    const char *passwordText = wifi_password_input[0] != '\0' ? wifi_password_input : "Enter Password...";
+    drawPortraitTextInRect(passwordText,
+                           WIFI_PASSWORD_BOX_X + 10,
+                           WIFI_PASSWORD_BOX_Y + 12,
+                           WIFI_PASSWORD_BOX_W - 20,
+                           WIFI_PASSWORD_BOX_H,
+                           (GFXfont *)&FiraSans);
+}
+
 static void drawPortraitTextInRectCenteredScaled(const char *text, int32_t rx, int32_t ry, int32_t rw, int32_t rh, const GFXfont *font, float scale)
 {
     const size_t textBufferSize = (EPD_WIDTH / 2) * PORTRAIT_HEIGHT;
@@ -797,30 +820,17 @@ static void drawSettingsScreen()
         snprintf(ssid_label, sizeof(ssid_label), "SSID: %s", wifi_ssid_input);
         drawPortraitTextCentered(ssid_label, 100, (GFXfont *)&FiraSans);
 
-        // Password input box
-        portraitDrawRect(34, 150, 472, 60, 0x00);
-        portraitDrawRect(35, 151, 470, 58, 0x00);
-        if (wifi_password_input[0] != '\0') {
-            char masked[64];
-            size_t len = strlen(wifi_password_input);
-            for (size_t i = 0; i < len; ++i) {
-                masked[i] = '*';
-            }
-            masked[len] = '\0';
-            drawPortraitTextInRect(masked, 44, 150, 452, 60, (GFXfont *)&FiraSans);
-        } else {
-            drawPortraitTextInRect("Enter Password...", 44, 150, 452, 60, (GFXfont *)&FiraSans);
-        }
+        drawWifiPasswordInputBox();
 
         // CONNECT button (Outline and thin lines only)
         portraitDrawRect(34, 230, 226, 60, 0x00);
         portraitDrawRect(37, 233, 220, 54, 0x00);
-        drawPortraitTextInRectCentered("CONNECT", 34, 230, 226, 60, (GFXfont *)&FiraSans);
+        drawPortraitTextInRectCentered("CONNECT", 34, 242, 226, 60, (GFXfont *)&FiraSans);
 
         // CANCEL button (Outline and thin lines only)
         portraitDrawRect(280, 230, 226, 60, 0x00);
         portraitDrawRect(283, 233, 220, 54, 0x00);
-        drawPortraitTextInRectCentered("CANCEL", 280, 230, 226, 60, (GFXfont *)&FiraSans);
+        drawPortraitTextInRectCentered("CANCEL", 280, 242, 226, 60, (GFXfont *)&FiraSans);
 
         // Draw keyboard in the lower half of the portrait screen.  The first
         // row is a dedicated number row, followed by three letter/symbol rows
@@ -989,7 +999,7 @@ static bool handleSettingsTouch(int16_t tx, int16_t ty)
                     wifi_password_input[len] = wifi_keyboard_numbers[c];
                     wifi_password_input[len + 1] = '\0';
                 }
-                refreshDisplay(drawSettingsScreen);
+                refreshWifiPasswordArea();
                 return true;
             }
         }
@@ -1023,7 +1033,7 @@ static bool handleSettingsTouch(int16_t tx, int16_t ty)
                             wifi_password_input[len + 1] = '\0';
                         }
                     }
-                    refreshDisplay(drawSettingsScreen);
+                    refreshWifiPasswordArea();
                     return true;
                 }
             }
@@ -1041,7 +1051,7 @@ static bool handleSettingsTouch(int16_t tx, int16_t ty)
                 } else {
                     kb_mode = KB_LOWERCASE;
                 }
-                refreshDisplay(drawSettingsScreen);
+                refreshWifiKeyboardArea();
                 return true;
             }
             // Space key (104-416)
@@ -1051,13 +1061,13 @@ static bool handleSettingsTouch(int16_t tx, int16_t ty)
                     wifi_password_input[len] = ' ';
                     wifi_password_input[len + 1] = '\0';
                 }
-                refreshDisplay(drawSettingsScreen);
+                refreshWifiPasswordArea();
                 return true;
             }
             // Clear key (416-520)
             if (px >= startX + keyW * 8 && px < startX + keyW * 10) {
                 wifi_password_input[0] = '\0';
-                refreshDisplay(drawSettingsScreen);
+                refreshWifiPasswordArea();
                 return true;
             }
         }
@@ -1503,43 +1513,91 @@ static bool handleCalculatorTouchLegacy(int16_t tx, int16_t ty)
 static void refreshDisplayExtended(void (*drawFn)(), bool use_black_refresh)
 {
     epd_poweron();
-    
-    if (use_black_refresh) {
-        // 150s interval refresh: use black color (black and white flashes/wipes to reset pixels and eliminate ghosting thoroughly)
-        Rect_t fullArea = epd_full_screen();
-        for (int i = 0; i < 2; i++) {
-            epd_push_pixels(fullArea, 50, 0); // Black flash
-            epd_push_pixels(fullArea, 50, 1); // White flash
-        }
-        for (int i = 0; i < 3; i++) {
-            epd_push_pixels(fullArea, 50, 1);
-        }
-    } else {
-        // Jump between pages: wipe the WHOLE screen white first (no blackout) to clean ghosting
-        // We use epd_full_screen() for white wipes/pulses just like the startup screen
-        for (int i = 0; i < 3; i++) {
-            epd_push_pixels(epd_full_screen(), 50, 1);
-        }
+
+    // Keep the top status bar untouched during refresh. Only wipe and redraw the
+    // content area below it, first black and then white, to reduce ghosting
+    // without blinking the top bar.
+    Rect_t contentArea = portraitRectToPhysicalRect(0, TOP_STATUS_BAR_H, PORTRAIT_WIDTH, PORTRAIT_HEIGHT - TOP_STATUS_BAR_H);
+    const int32_t refreshTime = use_black_refresh ? 50 : 100;
+    const int32_t wipeCycles = use_black_refresh ? 1 : 2;
+    for (int32_t i = 0; i < wipeCycles; ++i) {
+        epd_push_pixels(contentArea, refreshTime, 0); // Black wipe below top bar
+        epd_push_pixels(contentArea, refreshTime, 1); // White wipe below top bar
     }
-    
-    // Redraw everything including the top status bar because the entire screen was wiped white
+    // Finish with extra white pulses so the content area is clean before the
+    // next framebuffer image is drawn.
+    epd_push_pixels(contentArea, refreshTime, 1);
+
+    // Redraw the framebuffer, then update only the content area below the top bar.
     drawFn();
-    drawTopStatusBar(); // Ensure top bar is drawn on the framebuffer
-    
-    // Copy and update the entire physical screen area
-    Rect_t fullArea = epd_full_screen();
-    uint8_t *fullBuffer = copyPhysicalAreaFromFramebuffer(fullArea);
-    if (fullBuffer) {
-        epd_draw_grayscale_image(fullArea, fullBuffer);
-        free(fullBuffer);
+
+    uint8_t *contentBuffer = copyPhysicalAreaFromFramebuffer(contentArea);
+    if (contentBuffer) {
+        epd_draw_grayscale_image(contentArea, contentBuffer);
+        free(contentBuffer);
     }
-    
+
     epd_poweroff();
 }
 
 static void refreshDisplay(void (*drawFn)())
 {
     refreshDisplayExtended(drawFn, false);
+}
+
+static void refreshWifiPasswordArea()
+{
+    // Redraw only the password input framebuffer region so typing does not
+    // wipe the placeholder area, CONNECT button, CANCEL button, or keyboard.
+    drawWifiPasswordInputBox();
+
+    const int32_t margin = 4;
+    Rect_t passwordArea = portraitRectToPhysicalRect(WIFI_PASSWORD_BOX_X - margin,
+                                                     WIFI_PASSWORD_BOX_Y - margin,
+                                                     WIFI_PASSWORD_BOX_W + margin * 2,
+                                                     WIFI_PASSWORD_BOX_H + margin * 2);
+    uint8_t *passwordBuffer = copyPhysicalAreaFromFramebuffer(passwordArea);
+    if (!passwordBuffer) {
+        return;
+    }
+
+    epd_poweron();
+    epd_push_pixels(passwordArea, 60, 1); // White wipe only the password box area
+    epd_draw_grayscale_image(passwordArea, passwordBuffer);
+    epd_poweroff();
+
+    free(passwordBuffer);
+}
+
+static void refreshWifiKeyboardArea()
+{
+    // Redraw the full settings framebuffer in memory so keyboard labels match
+    // the new kb_mode, but only wipe/update the keyboard rectangle on the EPD.
+    drawSettingsScreen();
+
+    // E-paper partial updates can leave visible remnants when changing dense
+    // keyboard labels. Refresh a slightly larger band and use repeated
+    // black/white pulses before drawing the new keyboard image.
+    const int32_t keyboardMargin = 12;
+    const int32_t keyboardY = WIFI_KBD_START_Y - keyboardMargin;
+    const int32_t keyboardBottom = wifiKeyboardRowY(WIFI_KBD_ACTION_ROW) + WIFI_KBD_KEY_H + keyboardMargin;
+    const int32_t keyboardH = keyboardBottom - keyboardY;
+    Rect_t keyboardArea = portraitRectToPhysicalRect(0, keyboardY, PORTRAIT_WIDTH, keyboardH);
+    uint8_t *keyboardBuffer = copyPhysicalAreaFromFramebuffer(keyboardArea);
+    if (!keyboardBuffer) {
+        return;
+    }
+
+    epd_poweron();
+    for (int32_t i = 0; i < 3; ++i) {
+        epd_push_pixels(keyboardArea, 80, 0); // Black wipe only over keyboard
+        epd_push_pixels(keyboardArea, 80, 1); // White wipe only over keyboard
+    }
+    epd_push_pixels(keyboardArea, 80, 1); // Extra white pulse to clear residue
+    epd_draw_grayscale_image(keyboardArea, keyboardBuffer);
+    epd_poweroff();
+
+    free(keyboardBuffer);
 }
 
 static bool pointInRect(int32_t px, int32_t py, int32_t rx, int32_t ry, int32_t rw, int32_t rh)
