@@ -1,20 +1,7 @@
-/**
- * @copyright Copyright (c) 2024  Shenzhen Xin Yuan Electronic Technology Co., Ltd
- * @date      2024-04-05
- * @note      Arduino Setting
- *            Tools ->
- *                  Board:"ESP32S3 Dev Module"
- *                  USB CDC On Boot:"Enable"
- *                  USB DFU On Boot:"Disable"
- *                  Flash Size : "16MB(128Mb)"
- *                  Flash Mode"QIO 80MHz
- *                  Partition Scheme:"16M Flash(3M APP/9.9MB FATFS)"
- *                  PSRAM:"OPI PSRAM"
- *                  Upload Mode:"UART0/Hardware CDC"
- *                  USB Mode:"Hardware CDC and JTAG"
- *
- */
-
+# 1 "C:\\Users\\asd\\AppData\\Local\\Temp\\tmp74t7auci"
+#include <Arduino.h>
+# 1 "D:/project/epaper_s3/examples/demo/demo.ino"
+# 18 "D:/project/epaper_s3/examples/demo/demo.ino"
 #ifndef BOARD_HAS_PSRAM
 #error "Please enable PSRAM, Arduino IDE -> tools -> PSRAM -> OPI !!!"
 #endif
@@ -27,9 +14,9 @@
 #include <SPI.h>
 #include <SD.h>
 #include "logo.h"
-#include "Button2.h"            //Arduino IDE -> Library manager -> Install Button2
+#include "Button2.h"
 #include <Wire.h>
-#include <TouchDrvGT911.hpp>    //Arduino IDE -> Library manager -> Install SensorLib v0.19     
+#include <TouchDrvGT911.hpp>
 #include <SensorPCF8563.hpp>
 #include <WiFi.h>
 #include <esp_sntp.h>
@@ -40,19 +27,19 @@
 #include <time.h>
 
 #ifndef WIFI_SSID
-#define WIFI_SSID             "Your WiFi SSID"
+#define WIFI_SSID "Your WiFi SSID"
 #endif
 
 #ifndef WIFI_PASSWORD
-#define WIFI_PASSWORD         "Your WiFi PASSWORD"
+#define WIFI_PASSWORD "Your WiFi PASSWORD"
 #endif
 
 
 const char *ntpServer1 = "pool.ntp.org";
 const char *ntpServer2 = "time.nist.gov";
-const long  gmtOffset_sec = 3600;
-const int   daylightOffset_sec = 3600;
-const char *time_zone = "CST-8";  // TimeZone rule for Europe/Rome including daylight adjustment rules (optional)
+const long gmtOffset_sec = 3600;
+const int daylightOffset_sec = 3600;
+const char *time_zone = "CST-8";
 
 Button2 btn(BUTTON_1);
 
@@ -76,7 +63,7 @@ bool touchWasPressed = false;
 #define MAX_SCANNED_WIFI 10
 char scanned_ssids[MAX_SCANNED_WIFI][33];
 int scanned_count = 0;
-bool show_password_prompt = false; // true if we clicked an SSID and are now entering the password
+bool show_password_prompt = false;
 char wifi_ssid_input[33] = "";
 char wifi_password_input[64] = "";
 
@@ -175,10 +162,10 @@ static const uint8_t clockIcon50x50[] = {
     0x00, 0x00
 };
 
-// Portrait logical canvas. The EPD driver is fixed to the physical
-// 960x540 panel, so portrait drawing is done by mapping 540x960 logical
-// coordinates to the physical framebuffer rotated 90 degrees clockwise.
-#define PORTRAIT_WIDTH  EPD_HEIGHT
+
+
+
+#define PORTRAIT_WIDTH EPD_HEIGHT
 #define PORTRAIT_HEIGHT EPD_WIDTH
 
 static const int32_t HOME_ICON_SIZE = 118;
@@ -224,7 +211,56 @@ static inline void portraitPixel(int32_t x, int32_t y, uint8_t color)
     }
     epd_draw_pixel(y, PORTRAIT_WIDTH - 1 - x, color, framebuffer);
 }
-
+static void portraitFillRect(int32_t x, int32_t y, int32_t w, int32_t h, uint8_t color);
+static void portraitDrawRect(int32_t x, int32_t y, int32_t w, int32_t h, uint8_t color);
+static void portraitFillCircle(int32_t cx, int32_t cy, int32_t r, uint8_t color);
+static void portraitDrawCircle(int32_t cx, int32_t cy, int32_t r, uint8_t color);
+static void portraitDrawLine(int32_t x0, int32_t y0, int32_t x1, int32_t y1, uint8_t color);
+static void drawThickPortraitLine(int32_t x0, int32_t y0, int32_t x1, int32_t y1, int32_t thickness, uint8_t color);
+static void drawHomeStatusIcon(int32_t x, int32_t y, uint8_t color);
+static void drawWifiStatusIcon(int32_t x, int32_t y, bool connected, uint8_t color);
+static uint8_t getBatterySections();
+static void drawBatteryStatusIcon(int32_t x, int32_t y, uint8_t sections, uint8_t color);
+static void drawTopStatusBar();
+static void drawBitmapIcon1bpp(int32_t x, int32_t y, int32_t width, int32_t height, const uint8_t *bitmap, uint8_t color);
+static void drawCalcKeyIconCentered(const CalcButton &button);
+static void drawScaledBitmapIcon1bpp(int32_t x, int32_t y, int32_t width, int32_t height, const uint8_t *bitmap, int32_t scale, uint8_t color);
+static void drawPortraitTextCentered(const char *text, int32_t y, const GFXfont *font);
+static void drawPortraitTextInRect(const char *text, int32_t rx, int32_t ry, int32_t rw, int32_t rh, const GFXfont *font);
+static void drawPortraitTextRightInRect(const char *text, int32_t rx, int32_t ry, int32_t rw, int32_t rh, const GFXfont *font);
+static void drawPortraitTextInRectCentered(const char *text, int32_t rx, int32_t ry, int32_t rw, int32_t rh, const GFXfont *font);
+static void drawCalculatorDigits();
+static void drawSettingsIcon(int32_t x, int32_t y, int32_t size);
+static void drawPortraitStartup();
+static void drawWifiScanningScreenSingleWidth(const char *text, int32_t y, const GFXfont *font);
+static void drawPortraitTextInRectCenteredScaled(const char *text, int32_t rx, int32_t ry, int32_t rw, int32_t rh, const GFXfont *font, float scale);
+static void drawCalculatorResultArea();
+static Rect_t portraitRectToPhysicalRect(int32_t x, int32_t y, int32_t w, int32_t h);
+static uint8_t framebufferPixel(int32_t x, int32_t y);
+static void setPackedPixel(uint8_t *buffer, int32_t width, int32_t x, int32_t y, uint8_t color);
+static void refreshCalculatorResultArea();
+static void calcExpressionTextBounds(const char *text, int32_t *rx, int32_t *ry, int32_t *rw, int32_t *rh);
+static void expandAndClipCalcRefreshRect(int32_t *x, int32_t *y, int32_t *w, int32_t *h);
+static void refreshCalculatorResultArea(const char *previousExpression);
+static void formatCalcValue(double value);
+static void appendCalcExpression(const char *label);
+static void appendCalcOperatorToExpression(char op);
+static double currentCalcValue();
+static double applyCalcOp(double left, double right, char op);
+static void resetCalculator();
+static void appendCalcInput(const char *label);
+static void handleCalcButton(const char *label);
+static bool handleCalculatorTouch(int16_t tx, int16_t ty);
+static bool handleCalculatorTouchLegacy(int16_t tx, int16_t ty);
+static bool touchHitsClockTile(int16_t tx, int16_t ty);
+static bool touchHitsCalculatorTile(int16_t tx, int16_t ty);
+static bool touchHitsHomeStatusIcon(int16_t tx, int16_t ty);
+void WiFiGotIP(WiFiEvent_t event, WiFiEventInfo_t info);
+void timeavailable(struct timeval *t);
+void buttonPressed(Button2 &b);
+void setup();
+void loop();
+#line 228 "D:/project/epaper_s3/examples/demo/demo.ino"
 static void portraitFillRect(int32_t x, int32_t y, int32_t w, int32_t h, uint8_t color)
 {
     for (int32_t yy = y; yy < y + h; ++yy) {
@@ -376,10 +412,10 @@ static void drawTopStatusBar()
 {
     const int32_t barY = 0;
     const int32_t barH = 56;
-    // Don't fill with black color; instead keep the background white/clear (0xFF)
+
     portraitFillRect(0, barY, PORTRAIT_WIDTH, barH, 0xFF);
 
-    // Draw the home, wifi, and battery status icons in black color (0x00)
+
     drawHomeStatusIcon(22, barY + 9, 0x00);
     drawWifiStatusIcon(PORTRAIT_WIDTH - 136, barY + 10, WiFi.status() == WL_CONNECTED, 0x00);
     drawBatteryStatusIcon(PORTRAIT_WIDTH - 70, barY + 16, getBatterySections(), 0x00);
@@ -450,7 +486,7 @@ static void drawPortraitTextCentered(const char *text, int32_t y, const GFXfont 
         for (int32_t xx = 0; xx < PORTRAIT_WIDTH; ++xx) {
             uint8_t packed = textBuffer[yy * EPD_WIDTH / 2 + xx / 2];
             uint8_t color = (xx & 1) ? (packed >> 4) : (packed & 0x0F);
-            // Thinnest width text: Only draw pixels that are very dark (color <= 2) to prevent bolding/antialiasing bloat
+
             if (color <= 2) {
                 portraitPixel(xx, yy, 0x00);
             }
@@ -462,8 +498,8 @@ static void drawPortraitTextCentered(const char *text, int32_t y, const GFXfont 
 
 static void drawPortraitTextInRect(const char *text, int32_t rx, int32_t ry, int32_t rw, int32_t rh, const GFXfont *font)
 {
-    // Redirect to use drawPortraitTextInRectCentered which has mathematically perfect centering
-    // that doesn't suffer from baseline/height offset issues!
+
+
     drawPortraitTextInRectCentered(text, rx, ry, rw, rh, font);
 }
 
@@ -494,7 +530,7 @@ static void drawPortraitTextRightInRect(const char *text, int32_t rx, int32_t ry
         for (int32_t xx = startX; xx < endX; ++xx) {
             uint8_t packed = textBuffer[yy * EPD_WIDTH / 2 + xx / 2];
             uint8_t color = (xx & 1) ? (packed >> 4) : (packed & 0x0F);
-            // Thinnest width text: Only draw pixels that are very dark (color <= 2) to prevent bolding/antialiasing bloat
+
             if (color <= 2) {
                 portraitPixel(xx, yy, 0x00);
             }
@@ -506,15 +542,15 @@ static void drawPortraitTextRightInRect(const char *text, int32_t rx, int32_t ry
 
 static void drawPortraitTextInRectCentered(const char *text, int32_t rx, int32_t ry, int32_t rw, int32_t rh, const GFXfont *font)
 {
-    // EPD_HEIGHT is 540 and EPD_WIDTH is 960.
-    // In low-level font.c, write_mode is hardcoded to clip any pixel drawn at yy >= EPD_HEIGHT (540).
-    // In our portrait layout, yy is vertical and goes up to 960 (PORTRAIT_HEIGHT).
-    // Therefore, any key/text with ry >= 540 gets completely clipped (drawn as empty/blank).
-    // To bypass this low-level library constraint, we temporarily shift the vertical coordinate (ry)
-    // up into the safe [0, 500] range, call writeln(), and then shift the pixels back down when copying!
+
+
+
+
+
+
     int32_t shiftY = 0;
     if (ry >= 400) {
-        shiftY = ry - 200; // Shift up into safe bounds
+        shiftY = ry - 200;
     }
 
     const size_t textBufferSize = (EPD_WIDTH / 2) * PORTRAIT_HEIGHT;
@@ -530,11 +566,11 @@ static void drawPortraitTextInRectCentered(const char *text, int32_t rx, int32_t
     get_text_bounds(font, text, &x, &y, &x1, &y1, &w, &h, NULL);
 
     int32_t cursorX = rx + (rw - w) / 2 - x1;
-    // Shift baseline cursorY down by +16px to compensate for low-level yy drawing offset (+height instead of -height)
+
     int32_t cursorY = (ry - shiftY) + (rh - h) / 2 - y1 + 16;
     writeln(font, text, &cursorX, &cursorY, textBuffer);
 
-    // Expand the copying window vertically and horizontally by 20 pixels.
+
     int32_t startY = (ry - 20) < 0 ? 0 : (ry - 20);
     int32_t endY = (ry + rh + 20) > PORTRAIT_HEIGHT ? PORTRAIT_HEIGHT : (ry + rh + 20);
     int32_t startX = (rx - 20) < 0 ? 0 : (rx - 20);
@@ -546,7 +582,7 @@ static void drawPortraitTextInRectCentered(const char *text, int32_t rx, int32_t
         for (int32_t xx = startX; xx < endX; ++xx) {
             uint8_t packed = textBuffer[srcY * EPD_WIDTH / 2 + xx / 2];
             uint8_t color = (xx & 1) ? (packed >> 4) : (packed & 0x0F);
-            // Thinnest width text: Only draw pixels that are very dark (color <= 2) to prevent bolding/antialiasing bloat
+
             if (color <= 2) {
                 portraitPixel(xx, yy, 0x00);
             }
@@ -568,18 +604,18 @@ static void drawSettingsIcon(int32_t x, int32_t y, int32_t size)
     int32_t cy = y + size / 2;
 
     const int32_t num_teeth = 8;
-    const float R1 = 34.0f; // Base circle radius
-    const float R2 = 45.0f; // Tip circle radius
-    const float r_inner = 15.0f; // Inner circle radius
+    const float R1 = 34.0f;
+    const float R2 = 45.0f;
+    const float r_inner = 15.0f;
 
-    // We have 32 points on the outer gear contour (8 teeth * 4 points/tooth)
+
     int32_t px[32];
     int32_t py[32];
 
     for (int i = 0; i < num_teeth; ++i) {
         float angle_center = (i * 45.0f) * DEG_TO_RAD;
-        
-        // 4 points per tooth to define the trapezoidal profile
+
+
         float a0 = angle_center - 13.5f * DEG_TO_RAD;
         float a1 = angle_center - 8.0f * DEG_TO_RAD;
         float a2 = angle_center + 8.0f * DEG_TO_RAD;
@@ -598,13 +634,13 @@ static void drawSettingsIcon(int32_t x, int32_t y, int32_t size)
         py[i * 4 + 3] = cy + (int32_t)roundf(sinf(a3) * R1);
     }
 
-    // Connect the 32 points with thin lines to form a clean continuous gear outline
+
     for (int i = 0; i < 32; ++i) {
         int next = (i + 1) % 32;
         portraitDrawLine(px[i], py[i], px[next], py[next], 0x00);
     }
 
-    // Draw the dotted circle outline (between r_inner and R1)
+
     const int32_t num_dots = 24;
     const float r_dotted = 24.5f;
     for (int i = 0; i < num_dots; ++i) {
@@ -614,7 +650,7 @@ static void drawSettingsIcon(int32_t x, int32_t y, int32_t size)
         portraitPixel(dx, dy, 0x00);
     }
 
-    // Draw the inner circle outline
+
     portraitDrawCircle(cx, cy, (int32_t)r_inner, 0x00);
 }
 
@@ -672,7 +708,7 @@ static void drawWifiScanningScreenSingleWidth(const char *text, int32_t y, const
         for (int32_t xx = 0; xx < PORTRAIT_WIDTH; ++xx) {
             uint8_t packed = textBuffer[yy * EPD_WIDTH / 2 + xx / 2];
             uint8_t color = (xx & 1) ? (packed >> 4) : (packed & 0x0F);
-            // Single width text: Only draw pixels that are very dark (color <= 2) to prevent bolding/antialiasing bloat
+
             if (color <= 2) {
                 portraitPixel(xx, yy, 0x00);
             }
@@ -703,28 +739,28 @@ static void drawPortraitTextInRectCenteredScaled(const char *text, int32_t rx, i
     int32_t x1 = 0, y1 = 0, w = 0, h = 0;
     get_text_bounds(font, text, &x, &y, &x1, &y1, &w, &h, NULL);
 
-    // Draw full-scale text centered in a virtual bounding box scaled by 1/scale
+
     int32_t vrw = (int32_t)(rw / scale);
     int32_t vrh = (int32_t)(rh / scale);
     int32_t vrx = rx + (rw - vrw) / 2;
     int32_t vry = ry + (rh - vrh) / 2;
 
     int32_t cursorX = vrx + (vrw - w) / 2 - x1;
-    
-    // In Adafruit GFX, a character is drawn above the baseline. In write_mode/draw_char:
-    // int32_t yy = cursor_y - glyph->top + y; (where glyph->top is negative, so yy = cursor_y + |glyph->top| + y).
-    // Wait, the font drawing uses `yy = cursor_y - glyph->top + y` which is baseline + topOffset + y.
-    // If we subtract y1 (which is negative, e.g. -32) from cursorY, then cursorY is baseline coordinate.
-    // To completely prevent vertical clipping caused by y1 being mathematically slightly off or characters
-    // drawing slightly lower than y1 bounds, we shift the vertical baseline down by 16 pixels relative to the virtual vrh.
+
+
+
+
+
+
+
     int32_t cursorY = vry + (vrh - h) / 2 - y1 + 16;
     writeln(font, text, &cursorX, &cursorY, textBuffer);
 
     int32_t cx = rx + rw / 2;
     int32_t cy = ry + rh / 2;
 
-    // Expand the rendering scan loop horizontally and vertically (by 20px) to prevent vertical clipping.
-    // Since we only draw dark pixels, this keeps the scaled characters completely unclipped.
+
+
     int32_t startY = (ry - 20) < 0 ? 0 : (ry - 20);
     int32_t endY = (ry + rh + 20) > PORTRAIT_HEIGHT ? PORTRAIT_HEIGHT : (ry + rh + 20);
     int32_t startX = (rx - 20) < 0 ? 0 : (rx - 20);
@@ -736,14 +772,14 @@ static void drawPortraitTextInRectCenteredScaled(const char *text, int32_t rx, i
         float srcYf = cy + (yy - cy) * invScale;
         int32_t srcY0 = (int32_t)floorf(srcYf);
         int32_t srcY1 = (int32_t)ceilf(srcYf);
-        
+
         for (int32_t xx = startX; xx < endX; ++xx) {
             float srcXf = cx + (xx - cx) * invScale;
             int32_t srcX0 = (int32_t)floorf(srcXf);
             int32_t srcX1 = (int32_t)ceilf(srcXf);
-            
-            // To prevent segment loss during downscaling, we check adjacent pixels in the source buffer.
-            // If any source pixel in the immediate scaled footprint is dark, we draw the destination pixel.
+
+
+
             bool isDark = false;
             for (int32_t sy = srcY0; sy <= srcY1; ++sy) {
                 if (sy < 0 || sy >= PORTRAIT_HEIGHT) continue;
@@ -751,7 +787,7 @@ static void drawPortraitTextInRectCenteredScaled(const char *text, int32_t rx, i
                     if (sx < 0 || sx >= PORTRAIT_WIDTH) continue;
                     uint8_t packed = textBuffer[sy * EPD_WIDTH / 2 + sx / 2];
                     uint8_t color = (sx & 1) ? (packed >> 4) : (packed & 0x0F);
-                    // Use a slightly more inclusive threshold (color <= 5) for sampling during scaling so thin segments are preserved
+
                     if (color <= 5) {
                         isDark = true;
                         break;
@@ -759,7 +795,7 @@ static void drawPortraitTextInRectCenteredScaled(const char *text, int32_t rx, i
                 }
                 if (isDark) break;
             }
-            
+
             if (isDark) {
                 portraitPixel(xx, yy, 0x00);
             }
@@ -775,29 +811,29 @@ static void drawSettingsScreen()
     drawTopStatusBar();
 
     if (!show_password_prompt) {
-        // Page 1: List scanned SSIDs
+
         drawPortraitTextCentered("Select WiFi Network", 100, (GFXfont *)&FiraSans);
 
         if (scanned_count <= 0) {
             drawPortraitTextCentered("No networks found", 400, (GFXfont *)&FiraSans);
-            // Draw a neat "Retry" button (No frame)
+
             drawPortraitTextInRect("RETRY SCAN", 153, 500 + 15, 234, 60, (GFXfont *)&FiraSans);
         } else {
-            // Draw list of networks (up to 10) (No frames, shifted down by 15px to prevent upper letters from being blocked)
+
             int num_items = scanned_count > 10 ? 10 : scanned_count;
             for (int i = 0; i < num_items; ++i) {
                 int y = 140 + i * 65;
-                // Reduce the SSID font size by 20% (scale = 0.8f)
+
                 drawPortraitTextInRectCenteredScaled(scanned_ssids[i], 54, y + 15, 432, 55, (GFXfont *)&FiraSans, 0.8f);
             }
         }
     } else {
-        // Page 2: Password entry window
+
         char ssid_label[64];
         snprintf(ssid_label, sizeof(ssid_label), "SSID: %s", wifi_ssid_input);
         drawPortraitTextCentered(ssid_label, 100, (GFXfont *)&FiraSans);
 
-        // Password input box
+
         portraitDrawRect(34, 150, 472, 60, 0x00);
         portraitDrawRect(35, 151, 470, 58, 0x00);
         if (wifi_password_input[0] != '\0') {
@@ -812,20 +848,20 @@ static void drawSettingsScreen()
             drawPortraitTextInRect("Enter Password...", 44, 150, 452, 60, (GFXfont *)&FiraSans);
         }
 
-        // CONNECT button (Outline and thin lines only)
+
         portraitDrawRect(34, 230, 226, 60, 0x00);
         portraitDrawRect(37, 233, 220, 54, 0x00);
         drawPortraitTextInRectCentered("CONNECT", 34, 230, 226, 60, (GFXfont *)&FiraSans);
 
-        // CANCEL button (Outline and thin lines only)
+
         portraitDrawRect(280, 230, 226, 60, 0x00);
         portraitDrawRect(283, 233, 220, 54, 0x00);
         drawPortraitTextInRectCentered("CANCEL", 280, 230, 226, 60, (GFXfont *)&FiraSans);
 
-        // Draw keyboard in the lower half of the portrait screen.  The first
-        // row is a dedicated number row, followed by three letter/symbol rows
-        // and one action row; the shared constants keep drawing and touch
-        // hit-testing aligned.
+
+
+
+
         int startX = WIFI_KBD_START_X;
         int keyW = WIFI_KBD_KEY_W;
         int keyH = WIFI_KBD_KEY_H;
@@ -854,7 +890,7 @@ static void drawSettingsScreen()
             for (int c = 0; c < 10; ++c) {
                 char ch = current_kb[r][c];
                 int x = startX + c * keyW;
-                
+
                 portraitDrawRect(x, y, keyW, keyH, 0x00);
                 if (ch != '\0') {
                     char label[2] = {ch, '\0'};
@@ -867,9 +903,9 @@ static void drawSettingsScreen()
             }
         }
 
-        // Action row: Mode, Space, Clear
+
         int y3 = wifiKeyboardRowY(WIFI_KBD_ACTION_ROW);
-        // Mode key (2 cols)
+
         portraitDrawRect(startX, y3, keyW * 2, keyH, 0x00);
         if (kb_mode == KB_LOWERCASE) {
             drawPortraitTextInRect("ABC", startX, y3, keyW * 2, keyH, (GFXfont *)&FiraSans);
@@ -879,11 +915,11 @@ static void drawSettingsScreen()
             drawPortraitTextInRect("abc", startX, y3, keyW * 2, keyH, (GFXfont *)&FiraSans);
         }
 
-        // Space key (6 cols)
+
         portraitDrawRect(startX + keyW * 2, y3, keyW * 6, keyH, 0x00);
         drawPortraitTextInRect("SPACE", startX + keyW * 2, y3, keyW * 6, keyH, (GFXfont *)&FiraSans);
 
-        // Clear key (2 cols)
+
         portraitDrawRect(startX + keyW * 8, y3, keyW * 2, keyH, 0x00);
         drawPortraitTextInRect("CLR", startX + keyW * 8, y3, keyW * 2, keyH, (GFXfont *)&FiraSans);
     }
@@ -900,9 +936,9 @@ static bool handleSettingsTouch(int16_t tx, int16_t ty)
     }
 
     if (!show_password_prompt) {
-        // Page 1: List selection
+
         if (scanned_count == 0) {
-            // Retry scan button
+
             if (pointInRect(px, py, 153, 500, 234, 60)) {
                 refreshDisplay(drawWifiScanningScreen);
                 scanned_count = WiFi.scanNetworks();
@@ -931,40 +967,40 @@ static bool handleSettingsTouch(int16_t tx, int16_t ty)
             }
         }
     } else {
-        // Page 2: Password Prompt & Keyboard
 
-        // Cancel button click
+
+
         if (pointInRect(px, py, 280, 230, 226, 60)) {
             show_password_prompt = false;
             refreshDisplay(drawSettingsScreen);
             return true;
         }
 
-        // Connect button click
+
         if (pointInRect(px, py, 34, 230, 226, 60)) {
             if (wifi_ssid_input[0] != '\0') {
-                // Show connecting screen
+
                 memset(framebuffer, 0xFF, EPD_WIDTH * EPD_HEIGHT / 2);
                 drawTopStatusBar();
                 drawPortraitTextCentered("Connecting...", 400, (GFXfont *)&FiraSans);
                 refreshDisplay(drawSettingsScreen);
-                
+
                 WiFi.disconnect();
                 WiFi.begin(wifi_ssid_input, wifi_password_input);
-                
-                // Wait up to 10 seconds
+
+
                 int timeout = 0;
                 while (WiFi.status() != WL_CONNECTED && timeout < 20) {
                     delay(500);
                     timeout++;
                 }
-                
+
                 if (WiFi.status() == WL_CONNECTED) {
                     showingSettings = false;
                     show_password_prompt = false;
                     refreshDisplay(drawPortraitHome);
                 } else {
-                    // Connection failed screen
+
                     memset(framebuffer, 0xFF, EPD_WIDTH * EPD_HEIGHT / 2);
                     drawTopStatusBar();
                     drawPortraitTextCentered("Connection Failed", 400, (GFXfont *)&FiraSans);
@@ -1010,13 +1046,13 @@ static bool handleSettingsTouch(int16_t tx, int16_t ty)
                 char ch = current_kb[r][c];
                 if (ch != '\0') {
                     if (ch == '<') {
-                        // Backspace
+
                         size_t len = strlen(wifi_password_input);
                         if (len > 0) {
                             wifi_password_input[len - 1] = '\0';
                         }
                     } else {
-                        // Append char
+
                         size_t len = strlen(wifi_password_input);
                         if (len < sizeof(wifi_password_input) - 1) {
                             wifi_password_input[len] = ch;
@@ -1029,10 +1065,10 @@ static bool handleSettingsTouch(int16_t tx, int16_t ty)
             }
         }
 
-        // Action row keys touch
+
         int y3 = wifiKeyboardRowY(WIFI_KBD_ACTION_ROW);
         if (py >= y3 && py < y3 + keyH) {
-            // Mode key (0-104)
+
             if (px >= startX && px < startX + keyW * 2) {
                 if (kb_mode == KB_LOWERCASE) {
                     kb_mode = KB_UPPERCASE;
@@ -1044,7 +1080,7 @@ static bool handleSettingsTouch(int16_t tx, int16_t ty)
                 refreshDisplay(drawSettingsScreen);
                 return true;
             }
-            // Space key (104-416)
+
             if (px >= startX + keyW * 2 && px < startX + keyW * 8) {
                 size_t len = strlen(wifi_password_input);
                 if (len < sizeof(wifi_password_input) - 1) {
@@ -1054,7 +1090,7 @@ static bool handleSettingsTouch(int16_t tx, int16_t ty)
                 refreshDisplay(drawSettingsScreen);
                 return true;
             }
-            // Clear key (416-520)
+
             if (px >= startX + keyW * 8 && px < startX + keyW * 10) {
                 wifi_password_input[0] = '\0';
                 refreshDisplay(drawSettingsScreen);
@@ -1078,14 +1114,14 @@ static void drawPortraitHome()
     const int32_t startX = homeIconStartX();
     const int32_t startY = HOME_ICON_START_Y;
 
-    // Simple recognisable portrait-mode icons: settings, calculator, clock (Thin outlines, no fill)
+
     int32_t sx = startX;
     int32_t sy = startY;
     drawSettingsIcon(sx, sy, icon);
 
     int32_t cx = startX + icon + gap;
     int32_t cy = startY;
-    // Calculator Icon (Outline, no fill)
+
     portraitDrawRect(cx + 28, cy + 24, 62, 18, 0x00);
     for (int r = 0; r < 3; ++r) {
         for (int c = 0; c < 3; ++c) {
@@ -1095,13 +1131,13 @@ static void drawPortraitHome()
 
     int32_t kx = startX + (icon + gap) * 2;
     int32_t ky = startY;
-    // Clock Icon (Outline, thinnest line as possible, no fill)
+
     int32_t clock_cx = kx + 59;
     int32_t clock_cy = ky + 59;
     portraitDrawCircle(clock_cx, clock_cy, 45, 0x00);
     portraitDrawCircle(clock_cx, clock_cy, 2, 0x00);
-    portraitDrawLine(clock_cx, clock_cy, clock_cx - 15, clock_cy - 12, 0x00); // Hour hand
-    portraitDrawLine(clock_cx, clock_cy, clock_cx + 25, clock_cy - 15, 0x00); // Minute hand
+    portraitDrawLine(clock_cx, clock_cy, clock_cx - 15, clock_cy - 12, 0x00);
+    portraitDrawLine(clock_cx, clock_cy, clock_cx + 25, clock_cy - 15, 0x00);
 
     portraitDrawRect((PORTRAIT_WIDTH - 180) / 2, PORTRAIT_HEIGHT - 150, 180, 70, 0x00);
 }
@@ -1165,7 +1201,7 @@ static void drawCalculatorScreen()
         const CalcButton &b = calcButtons[i];
         portraitDrawRect(b.x, b.y, b.w, b.h, 0x00);
         portraitDrawRect(b.x + 3, b.y + 3, b.w - 6, b.h - 6, 0x00);
-        // Draw crisp thinnest-possible vector text for all calculator keys
+
         drawPortraitTextInRectCentered(b.label, b.x, b.y, b.w, b.h, (GFXfont *)&FiraSans);
     }
 }
@@ -1307,7 +1343,7 @@ static void refreshCalculatorResultArea(const char *previousExpression)
         return;
     }
     epd_poweron();
-    // Wipe once with white color to clear previous characters cleanly, then draw the text once to maintain perfect solid black and crisp white (steady color, no graying)
+
     epd_push_pixels(area, 50, 1);
     epd_draw_grayscale_image(area, areaBuffer);
     epd_poweroff();
@@ -1503,37 +1539,37 @@ static bool handleCalculatorTouchLegacy(int16_t tx, int16_t ty)
 static void refreshDisplayExtended(void (*drawFn)(), bool use_black_refresh)
 {
     epd_poweron();
-    
+
     if (use_black_refresh) {
-        // 150s interval refresh: use black color (black and white flashes/wipes to reset pixels and eliminate ghosting thoroughly)
+
         Rect_t fullArea = epd_full_screen();
         for (int i = 0; i < 2; i++) {
-            epd_push_pixels(fullArea, 50, 0); // Black flash
-            epd_push_pixels(fullArea, 50, 1); // White flash
+            epd_push_pixels(fullArea, 50, 0);
+            epd_push_pixels(fullArea, 50, 1);
         }
         for (int i = 0; i < 3; i++) {
             epd_push_pixels(fullArea, 50, 1);
         }
     } else {
-        // Jump between pages: wipe the WHOLE screen white first (no blackout) to clean ghosting
-        // We use epd_full_screen() for white wipes/pulses just like the startup screen
+
+
         for (int i = 0; i < 3; i++) {
             epd_push_pixels(epd_full_screen(), 50, 1);
         }
     }
-    
-    // Redraw everything including the top status bar because the entire screen was wiped white
+
+
     drawFn();
-    drawTopStatusBar(); // Ensure top bar is drawn on the framebuffer
-    
-    // Copy and update the entire physical screen area
+    drawTopStatusBar();
+
+
     Rect_t fullArea = epd_full_screen();
     uint8_t *fullBuffer = copyPhysicalAreaFromFramebuffer(fullArea);
     if (fullBuffer) {
         epd_draw_grayscale_image(fullArea, fullBuffer);
         free(fullBuffer);
     }
-    
+
     epd_poweroff();
 }
 
@@ -1550,12 +1586,12 @@ static bool pointInRect(int32_t px, int32_t py, int32_t rx, int32_t ry, int32_t 
 static bool portraitPointFromTouch(int16_t tx, int16_t ty, int32_t *px, int32_t *py, bool alternate)
 {
     if (alternate) {
-        // Convert from the physical landscape coordinate space into the
-        // portrait logical coordinate space used by portraitPixel().
+
+
         *px = PORTRAIT_WIDTH - 1 - ty;
         *py = tx;
     } else {
-        // Some touch configurations already report the portrait logical space.
+
         *px = tx;
         *py = ty;
     }
@@ -1600,7 +1636,7 @@ static bool touchHitsSettingsTile(int16_t tx, int16_t ty)
 
 static bool touchHitsWifiStatusIcon(int16_t tx, int16_t ty)
 {
-    // Tap area centered on the top status bar's WiFi icon (PORTRAIT_WIDTH - 136, y = 10)
+
     return touchHitsPortraitRect(tx, ty, PORTRAIT_WIDTH - 150, 0, 70, 56);
 }
 
@@ -1646,31 +1682,24 @@ void setup()
     Serial.begin(115200);
 
 
-    // Set WiFi to station mode and disconnect from an AP if it was previously connected
+
     WiFi.mode(WIFI_STA);
     WiFi.disconnect();
     WiFi.onEvent(WiFiGotIP, WiFiEvent_t::ARDUINO_EVENT_WIFI_STA_GOT_IP);
 
     WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
 
-    // set notification call-back function
+
     sntp_set_time_sync_notification_cb( timeavailable );
-
-    /**
-     * This will set configured ntp servers and constant TimeZone/daylightOffset
-     * should be OK if your time zone does not need to adjust daylightOffset twice a year,
-     * in such a case time adjustment won't be handled automagicaly.
-     */
-    // configTime(gmtOffset_sec, daylightOffset_sec, ntpServer1, ntpServer2);
-
+# 1666 "D:/project/epaper_s3/examples/demo/demo.ino"
     configTzTime(time_zone, ntpServer1, ntpServer2);
 
 
-    /**
-    * SD Card test
-    * Only as a test SdCard hardware, use example reference
-    * https://github.com/espressif/arduino-esp32/tree/master/libraries/SD/examples
-    */
+
+
+
+
+
     SPI.begin(SD_SCLK, SD_MISO, SD_MOSI);
     bool rlst = SD.begin(SD_CS, SPI);
     if (!rlst) {
@@ -1684,7 +1713,7 @@ void setup()
                 );
     }
 
-    // Correct the ADC reference voltage
+
     esp_adc_cal_characteristics_t adc_chars;
     esp_adc_cal_value_t val_type = esp_adc_cal_characterize(
                                        ADC_UNIT_2,
@@ -1708,7 +1737,7 @@ void setup()
 
     epd_init();
 
-    // Startup screen showing "Asundar" for 3 seconds in portrait orientation
+
     epd_poweron();
     epd_clear();
     drawPortraitStartup();
@@ -1717,13 +1746,13 @@ void setup()
     delay(3000);
 
     epd_poweron();
-    // Wipe out "Asundar" with white color. To prevent/remove any ghost image, we do multiple white wipes (pulses) to thoroughly clear the screen without doing a harsh black flash.
+
     for (int i = 0; i < 3; i++) {
         epd_push_pixels(epd_full_screen(), 50, 1);
     }
 
 #if defined(CONFIG_IDF_TARGET_ESP32S3)
-    // Assuming that the previous touch was in sleep state, wake it up
+
     pinMode(TOUCH_INT, OUTPUT);
     digitalWrite(TOUCH_INT, HIGH);
 
@@ -1733,13 +1762,13 @@ void setup()
 
     Wire.beginTransmission(0x51);
     found_rtc = Wire.endTransmission() == 0;
-    // rtc.setDateTime(2022, 6, 30, 0, 0, 0);
 
 
-    /*
-    * The touch reset pin uses hardware pull-up,
-    * and the function of setting the I2C device address cannot be used.
-    * Use scanning to obtain the touch device address.*/
+
+
+
+
+
     uint8_t touchAddress = 0x14;
 
     Wire.beginTransmission(0x14);
@@ -1766,27 +1795,27 @@ void setup()
 
     epd_poweroff();
 
-    // Set the button callback function
+
     btn.setPressedHandler(buttonPressed);
 
-    // Set the initial touch interval value
+
     touch_loop_interval = millis() + 300;
 
-    // Set the initial auto page refresh timer (150s from startup)
+
     auto_refresh_interval = millis() + 150000;
 }
 
 
 void loop()
 {
-    // Check if NTP time is synced and RTC is not synced
+
     if (ntp_synced && !rtc_synced) {
         rtc_synced = true;
-        // Sync RTC with NTP time
+
         rtc.hwClockWrite();
     }
 
-    // Auto page refresh timer that triggers every 150s (150000ms) to clear ghosting and refresh active view using black refresh
+
     if (millis() > auto_refresh_interval) {
         auto_refresh_interval = millis() + 150000;
         if (showingClock) {
@@ -1808,12 +1837,12 @@ void loop()
 
     if (touchOnline) {
 
-        // Limit the touch detection interval and detect the touch status every 300ms
-        // https://github.com/Xinyuan-LilyGO/LilyGo-EPD47/issues/143
-        if (millis()  < touch_loop_interval) {
+
+
+        if (millis() < touch_loop_interval) {
             return;
         }
-        int16_t  x, y;
+        int16_t x, y;
 
         if (!digitalRead(TOUCH_INT)) {
             touchWasPressed = false;
@@ -1872,12 +1901,12 @@ void loop()
                 wifi_ssid_input[0] = '\0';
                 wifi_password_input[0] = '\0';
                 refreshDisplay(drawWifiScanningScreen);
-                
-                // Ensure WiFi is in STATION mode, disconnect first, then scan
+
+
                 WiFi.mode(WIFI_STA);
                 WiFi.disconnect();
                 delay(100);
-                
+
                 scanned_count = WiFi.scanNetworks();
                 if (scanned_count > MAX_SCANNED_WIFI) {
                     scanned_count = MAX_SCANNED_WIFI;
@@ -1919,10 +1948,10 @@ void loop()
 
                         Serial.end();
 
-                        // Timer wakeup  + gpio wakeup = 388uA , see  https://github.com/Xinyuan-LilyGO/LilyGo-EPD47/issues/144
+
                         esp_sleep_enable_timer_wakeup(30 * 1000000ULL);
 
-                        // BOOT(STR_IO0) Button wakeup 388uA
+
                         esp_sleep_enable_ext1_wakeup(_BV(0), ESP_EXT1_WAKEUP_ANY_LOW);
 
                         esp_deep_sleep_start();
