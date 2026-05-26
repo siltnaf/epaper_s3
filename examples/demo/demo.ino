@@ -39,6 +39,7 @@
 #include "utilities.h"
 #include "calc_key_icons.h"
 #include "wifi_key_icons.h"
+#include "book_nav_icons.h"
 #include <math.h>
 #include <time.h>
 
@@ -76,6 +77,7 @@ bool rtc_synced = false;
 bool showingClock = false;
 bool showingCalculator = false;
 bool showingSettings = false;
+bool showingSettingsMenu = false;
 bool showingContentSettings = false;
 bool showingBookLibrary = false;
 bool touchWasPressed = false;
@@ -162,6 +164,7 @@ static const CalcButton calcButtons[] = {
 static void drawPortraitHome();
 static void drawAnalogClockScreen();
 static void drawCalculatorScreen();
+static void drawSettingsMenuScreen();
 static void drawSettingsScreen();
 static void drawContentSettingsScreen();
 static void drawBookLibraryScreen();
@@ -180,6 +183,7 @@ static bool pointInRect(int32_t px, int32_t py, int32_t rx, int32_t ry, int32_t 
 static bool portraitPointFromTouch(int16_t tx, int16_t ty, int32_t *px, int32_t *py, bool alternate);
 static bool touchHitsPortraitRect(int16_t tx, int16_t ty, int32_t rx, int32_t ry, int32_t rw, int32_t rh);
 static bool handleSettingsTouch(int16_t tx, int16_t ty);
+static bool handleSettingsMenuTouch(int16_t tx, int16_t ty);
 static bool handleContentSettingsTouch(int16_t tx, int16_t ty);
 static void processTouchRelease(int16_t x, int16_t y);
 static bool touchHitsSettingsTile(int16_t tx, int16_t ty);
@@ -264,6 +268,15 @@ static const int32_t CONTENT_URL_BOX_X = 34;
 static const int32_t CONTENT_URL_BOX_Y = 150;
 static const int32_t CONTENT_URL_BOX_W = 472;
 static const int32_t CONTENT_URL_BOX_H = 60;
+static const int32_t BOOK_NAV_ICON_SIZE = 64;
+static const int32_t BOOK_NAV_ICON_X = PORTRAIT_WIDTH - BOOK_NAV_ICON_SIZE - 24;
+static const int32_t BOOK_NAV_UP_Y = 118;
+static const int32_t BOOK_NAV_DOWN_Y = PORTRAIT_HEIGHT - BOOK_NAV_ICON_SIZE - 34;
+static const int32_t SETTINGS_MENU_ITEM_X = 54;
+static const int32_t SETTINGS_MENU_ITEM_W = PORTRAIT_WIDTH - 108;
+static const int32_t SETTINGS_MENU_ITEM_H = 86;
+static const int32_t SETTINGS_MENU_ITEM_GAP = 28;
+static const int32_t SETTINGS_MENU_FIRST_Y = 190;
 
 static const char wifi_keyboard_numbers[10] = {'1', '2', '3', '4', '5', '6', '7', '8', '9', '0'};
 
@@ -1439,6 +1452,8 @@ static void drawBookLibraryScreen()
     drawTopStatusBar();
 
     drawPortraitTextCentered("Book Library", 102, (GFXfont *)&FiraSans);
+    drawBitmapIcon1bpp(BOOK_NAV_ICON_X, BOOK_NAV_UP_Y, BOOK_NAV_ICON_W, BOOK_NAV_ICON_H, book_nav_up_icon_64x64, 0x00);
+    drawBitmapIcon1bpp(BOOK_NAV_ICON_X, BOOK_NAV_DOWN_Y, BOOK_NAV_ICON_W, BOOK_NAV_ICON_H, book_nav_down_icon_64x64, 0x00);
 
     if (book_count <= 0) {
         drawPortraitTextInRectCenteredScaled(book_library_status,
