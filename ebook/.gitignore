@@ -1,0 +1,14 @@
+node_modules/
+npm-debug.log*
+
+# Runtime files
+.server.pid
+server.log
+
+# Local TLS certificates and private keys
+certs/*
+!certs/.gitkeep
+*.key
+*.pem
+*.crt
+*.csr

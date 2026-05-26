@@ -32,6 +32,9 @@
 #include <TouchDrvGT911.hpp>    //Arduino IDE -> Library manager -> Install SensorLib v0.19     
 #include <SensorPCF8563.hpp>
 #include <WiFi.h>
+#include <HTTPClient.h>
+#include <Preferences.h>
+#include <ArduinoJson.h>
 #include <esp_sntp.h>
 #include "utilities.h"
 #include "calc_key_icons.h"
@@ -58,6 +61,8 @@ Button2 btn(BUTTON_1);
 
 SensorPCF8563 rtc;
 TouchDrvGT911 touch;
+Preferences wifiPrefs;
+Preferences appPrefs;
 
 uint8_t *framebuffer = NULL;
 bool touchOnline = false;
@@ -71,7 +76,15 @@ bool rtc_synced = false;
 bool showingClock = false;
 bool showingCalculator = false;
 bool showingSettings = false;
+bool showingContentSettings = false;
+bool showingBookLibrary = false;
 bool touchWasPressed = false;
+bool lastWifiConnected = false;
+volatile bool wifiStatusRefreshPending = false;
+bool touchLatchActive = false;
+int16_t latchedTouchX = 0;
+int16_t latchedTouchY = 0;
+uint32_t lastTouchReleaseTime = 0;
 
 #define MAX_SCANNED_WIFI 10
 char scanned_ssids[MAX_SCANNED_WIFI][33];
@@ -79,6 +92,22 @@ int scanned_count = 0;
 bool show_password_prompt = false; // true if we clicked an SSID and are now entering the password
 char wifi_ssid_input[33] = "";
 char wifi_password_input[64] = "";
+char saved_wifi_ssid[33] = "";
+char saved_wifi_password[64] = "";
+char saved_content_url[256] = "";
+char content_url_input[256] = "";
+
+#define MAX_BOOK_ITEMS 10
+struct BookListItem {
+    int32_t id;
+    char title[80];
+    char author[40];
+    char category[40];
+};
+BookListItem book_items[MAX_BOOK_ITEMS];
+int book_count = 0;
+int book_total = 0;
+char book_library_status[96] = "Tap book icon to load library";
 
 enum KeyboardMode {
     KB_LOWERCASE,
@@ -106,6 +135,7 @@ const char keyboard_symbols[3][10] = {
 };
 uint32_t clock_refresh_interval = 0;
 uint32_t auto_refresh_interval = 0;
+uint32_t wifi_reconnect_interval = 0;
 char calcDisplay[24] = "0";
 char calcExpression[64] = "0";
 double calcStored = 0.0;
@@ -133,17 +163,34 @@ static void drawPortraitHome();
 static void drawAnalogClockScreen();
 static void drawCalculatorScreen();
 static void drawSettingsScreen();
+static void drawContentSettingsScreen();
+static void drawBookLibraryScreen();
+static void drawBookLibraryLoadingScreen();
 static void drawWifiScanningScreen();
+static void drawBookIcon(int32_t x, int32_t y, int32_t w, int32_t h);
 static void refreshDisplay(void (*drawFn)());
 static void drawWifiPasswordInputBox();
+static void drawContentUrlInputBox();
 static void refreshWifiPasswordArea();
+static void refreshContentUrlArea();
 static void refreshWifiKeyboardArea();
+static void refreshContentKeyboardArea();
+static void refreshWifiStatusIconArea();
 static bool pointInRect(int32_t px, int32_t py, int32_t rx, int32_t ry, int32_t rw, int32_t rh);
 static bool portraitPointFromTouch(int16_t tx, int16_t ty, int32_t *px, int32_t *py, bool alternate);
 static bool touchHitsPortraitRect(int16_t tx, int16_t ty, int32_t rx, int32_t ry, int32_t rw, int32_t rh);
 static bool handleSettingsTouch(int16_t tx, int16_t ty);
+static bool handleContentSettingsTouch(int16_t tx, int16_t ty);
+static void processTouchRelease(int16_t x, int16_t y);
 static bool touchHitsSettingsTile(int16_t tx, int16_t ty);
+static bool touchHitsBookTile(int16_t tx, int16_t ty);
 static bool touchHitsWifiStatusIcon(int16_t tx, int16_t ty);
+static bool loadSavedWifiCredentials();
+static void saveWifiCredentials(const char *ssid, const char *password);
+static void loadContentUrl();
+static void saveContentUrl();
+static bool fetchBookLibrary();
+static void buildBooksApiUrl(char *out, size_t outSize);
 
 static const uint8_t clockIcon50x50[] = {
     0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
@@ -212,6 +259,11 @@ static const int32_t WIFI_PASSWORD_BOX_X = 34;
 static const int32_t WIFI_PASSWORD_BOX_Y = 150;
 static const int32_t WIFI_PASSWORD_BOX_W = 472;
 static const int32_t WIFI_PASSWORD_BOX_H = 60;
+static const int32_t CONTENT_SETTINGS_TITLE_Y = 122;
+static const int32_t CONTENT_URL_BOX_X = 34;
+static const int32_t CONTENT_URL_BOX_Y = 150;
+static const int32_t CONTENT_URL_BOX_W = 472;
+static const int32_t CONTENT_URL_BOX_H = 60;
 
 static const char wifi_keyboard_numbers[10] = {'1', '2', '3', '4', '5', '6', '7', '8', '9', '0'};
 
@@ -626,6 +678,40 @@ static void drawSettingsIcon(int32_t x, int32_t y, int32_t size)
     portraitDrawCircle(cx, cy, (int32_t)r_inner, 0x00);
 }
 
+static void drawBookIcon(int32_t x, int32_t y, int32_t w, int32_t h)
+{
+    // Open-book icon, drawn with thin vector lines to match the home page style.
+    const int32_t marginX = w / 8;
+    const int32_t marginY = h / 5;
+    const int32_t left = x + marginX;
+    const int32_t right = x + w - marginX;
+    const int32_t top = y + marginY;
+    const int32_t bottom = y + h - marginY;
+    const int32_t center = x + w / 2;
+    const int32_t curve = 8;
+
+    // Left cover/page outline
+    portraitDrawLine(center, top + curve, left, top, 0x00);
+    portraitDrawLine(left, top, left, bottom - curve, 0x00);
+    portraitDrawLine(left, bottom - curve, center, bottom, 0x00);
+
+    // Right cover/page outline
+    portraitDrawLine(center, top + curve, right, top, 0x00);
+    portraitDrawLine(right, top, right, bottom - curve, 0x00);
+    portraitDrawLine(right, bottom - curve, center, bottom, 0x00);
+
+    // Center spine
+    portraitDrawLine(center, top + curve, center, bottom, 0x00);
+    portraitDrawLine(center + 1, top + curve + 1, center + 1, bottom - 1, 0x00);
+
+    // Page lines
+    for (int32_t i = 0; i < 3; ++i) {
+        int32_t yy = top + 10 + i * 9;
+        portraitDrawLine(left + 9, yy, center - 9, yy + 4, 0x00);
+        portraitDrawLine(center + 9, yy + 4, right - 9, yy, 0x00);
+    }
+}
+
 static void drawPortraitStartup()
 {
     memset(framebuffer, 0xFF, EPD_WIDTH * EPD_HEIGHT / 2);
@@ -899,6 +985,203 @@ static void drawSettingsScreen()
     }
 }
 
+static void drawContentUrlInputBox()
+{
+    portraitFillRect(CONTENT_URL_BOX_X, CONTENT_URL_BOX_Y, CONTENT_URL_BOX_W, CONTENT_URL_BOX_H, 0xFF);
+    portraitDrawRect(CONTENT_URL_BOX_X, CONTENT_URL_BOX_Y, CONTENT_URL_BOX_W, CONTENT_URL_BOX_H, 0x00);
+    portraitDrawRect(CONTENT_URL_BOX_X + 1, CONTENT_URL_BOX_Y + 1, CONTENT_URL_BOX_W - 2, CONTENT_URL_BOX_H - 2, 0x00);
+
+    const char *urlText = content_url_input[0] != '\0' ? content_url_input : "https://";
+    drawPortraitTextInRectCenteredScaled(urlText,
+                                         CONTENT_URL_BOX_X + 10,
+                                         CONTENT_URL_BOX_Y + 12,
+                                         CONTENT_URL_BOX_W - 20,
+                                         CONTENT_URL_BOX_H,
+                                         (GFXfont *)&FiraSans,
+                                         0.58f);
+}
+
+static void drawContentSettingsScreen()
+{
+    memset(framebuffer, 0xFF, EPD_WIDTH * EPD_HEIGHT / 2);
+    drawTopStatusBar();
+
+    drawPortraitTextCentered("Content Settings", CONTENT_SETTINGS_TITLE_Y, (GFXfont *)&FiraSans);
+
+    // First row: URL input box. Keep the page title separate so the URL label is not repeated.
+    drawContentUrlInputBox();
+
+    // SAVE and CLEAR controls above the shared on-screen keyboard.
+    portraitDrawRect(34, 230, 226, 60, 0x00);
+    portraitDrawRect(37, 233, 220, 54, 0x00);
+    drawPortraitTextInRectCentered("SAVE", 34, 242, 226, 60, (GFXfont *)&FiraSans);
+
+    portraitDrawRect(280, 230, 226, 60, 0x00);
+    portraitDrawRect(283, 233, 220, 54, 0x00);
+    drawPortraitTextInRectCentered("CLEAR", 280, 242, 226, 60, (GFXfont *)&FiraSans);
+
+    int startX = WIFI_KBD_START_X;
+    int keyW = WIFI_KBD_KEY_W;
+    int keyH = WIFI_KBD_KEY_H;
+
+    const char (*current_kb)[10];
+    if (kb_mode == KB_LOWERCASE) {
+        current_kb = keyboard_lowercase;
+    } else if (kb_mode == KB_UPPERCASE) {
+        current_kb = keyboard_uppercase;
+    } else {
+        current_kb = keyboard_symbols;
+    }
+
+    for (int c = 0; c < 10; ++c) {
+        char ch = wifi_keyboard_numbers[c];
+        int x = startX + c * keyW;
+        int y = wifiKeyboardRowY(WIFI_KBD_NUMERIC_ROW);
+        portraitDrawRect(x, y, keyW, keyH, 0x00);
+        char label[2] = {ch, '\0'};
+        drawPortraitTextInRectCentered(label, x, y, keyW, keyH, (GFXfont *)&FiraSans);
+    }
+
+    for (int r = 0; r < 3; ++r) {
+        int y = wifiKeyboardRowY(WIFI_KBD_LETTER_ROW_START + r);
+        for (int c = 0; c < 10; ++c) {
+            char ch = current_kb[r][c];
+            int x = startX + c * keyW;
+            portraitDrawRect(x, y, keyW, keyH, 0x00);
+            if (ch != '\0') {
+                char label[2] = {ch, '\0'};
+                if (ch == '<') {
+                    drawPortraitTextInRectCentered("<-", x, y, keyW, keyH, (GFXfont *)&FiraSans);
+                } else {
+                    drawPortraitTextInRectCentered(label, x, y, keyW, keyH, (GFXfont *)&FiraSans);
+                }
+            }
+        }
+    }
+
+    int y3 = wifiKeyboardRowY(WIFI_KBD_ACTION_ROW);
+    portraitDrawRect(startX, y3, keyW * 2, keyH, 0x00);
+    if (kb_mode == KB_LOWERCASE) {
+        drawPortraitTextInRect("ABC", startX, y3, keyW * 2, keyH, (GFXfont *)&FiraSans);
+    } else if (kb_mode == KB_UPPERCASE) {
+        drawPortraitTextInRect("123", startX, y3, keyW * 2, keyH, (GFXfont *)&FiraSans);
+    } else {
+        drawPortraitTextInRect("abc", startX, y3, keyW * 2, keyH, (GFXfont *)&FiraSans);
+    }
+
+    portraitDrawRect(startX + keyW * 2, y3, keyW * 6, keyH, 0x00);
+    drawPortraitTextInRect("SPACE", startX + keyW * 2, y3, keyW * 6, keyH, (GFXfont *)&FiraSans);
+
+    portraitDrawRect(startX + keyW * 8, y3, keyW * 2, keyH, 0x00);
+    drawPortraitTextInRect("CLR", startX + keyW * 8, y3, keyW * 2, keyH, (GFXfont *)&FiraSans);
+}
+
+static bool handleContentSettingsTouch(int16_t tx, int16_t ty)
+{
+    int32_t px = 0;
+    int32_t py = 0;
+    if (!portraitPointFromTouch(tx, ty, &px, &py, true)) {
+        if (!portraitPointFromTouch(tx, ty, &px, &py, false)) {
+            return false;
+        }
+    }
+
+    if (pointInRect(px, py, 34, 230, 226, 60)) {
+        saveContentUrl();
+        drawContentUrlInputBox();
+        refreshContentUrlArea();
+        return true;
+    }
+
+    if (pointInRect(px, py, 280, 230, 226, 60)) {
+        content_url_input[0] = '\0';
+        refreshContentUrlArea();
+        return true;
+    }
+
+    int startX = WIFI_KBD_START_X;
+    int keyW = WIFI_KBD_KEY_W;
+    int keyH = WIFI_KBD_KEY_H;
+
+    int numberY = wifiKeyboardRowY(WIFI_KBD_NUMERIC_ROW);
+    if (py >= numberY && py < numberY + keyH) {
+        int c = (px - startX) / keyW;
+        if (c >= 0 && c < 10) {
+            size_t len = strlen(content_url_input);
+            if (len < sizeof(content_url_input) - 1) {
+                content_url_input[len] = wifi_keyboard_numbers[c];
+                content_url_input[len + 1] = '\0';
+            }
+            refreshContentUrlArea();
+            return true;
+        }
+    }
+
+    int letterStartY = wifiKeyboardRowY(WIFI_KBD_LETTER_ROW_START);
+    if (py >= letterStartY && py < letterStartY + 3 * (keyH + WIFI_KBD_GAP_Y)) {
+        int r = (py - letterStartY) / (keyH + WIFI_KBD_GAP_Y);
+        int c = (px - startX) / keyW;
+        if (c >= 0 && c < 10) {
+            const char (*current_kb)[10];
+            if (kb_mode == KB_LOWERCASE) {
+                current_kb = keyboard_lowercase;
+            } else if (kb_mode == KB_UPPERCASE) {
+                current_kb = keyboard_uppercase;
+            } else {
+                current_kb = keyboard_symbols;
+            }
+            char ch = current_kb[r][c];
+            if (ch != '\0') {
+                if (ch == '<') {
+                    size_t len = strlen(content_url_input);
+                    if (len > 0) {
+                        content_url_input[len - 1] = '\0';
+                    }
+                } else {
+                    size_t len = strlen(content_url_input);
+                    if (len < sizeof(content_url_input) - 1) {
+                        content_url_input[len] = ch;
+                        content_url_input[len + 1] = '\0';
+                    }
+                }
+                refreshContentUrlArea();
+                return true;
+            }
+        }
+    }
+
+    int y3 = wifiKeyboardRowY(WIFI_KBD_ACTION_ROW);
+    if (py >= y3 && py < y3 + keyH) {
+        if (px >= startX && px < startX + keyW * 2) {
+            if (kb_mode == KB_LOWERCASE) {
+                kb_mode = KB_UPPERCASE;
+            } else if (kb_mode == KB_UPPERCASE) {
+                kb_mode = KB_SYMBOLS;
+            } else {
+                kb_mode = KB_LOWERCASE;
+            }
+            refreshContentKeyboardArea();
+            return true;
+        }
+        if (px >= startX + keyW * 2 && px < startX + keyW * 8) {
+            size_t len = strlen(content_url_input);
+            if (len < sizeof(content_url_input) - 1) {
+                content_url_input[len] = ' ';
+                content_url_input[len + 1] = '\0';
+            }
+            refreshContentUrlArea();
+            return true;
+        }
+        if (px >= startX + keyW * 8 && px < startX + keyW * 10) {
+            content_url_input[0] = '\0';
+            refreshContentUrlArea();
+            return true;
+        }
+    }
+
+    return false;
+}
+
 static bool handleSettingsTouch(int16_t tx, int16_t ty)
 {
     int32_t px = 0;
@@ -957,9 +1240,21 @@ static bool handleSettingsTouch(int16_t tx, int16_t ty)
                 memset(framebuffer, 0xFF, EPD_WIDTH * EPD_HEIGHT / 2);
                 drawTopStatusBar();
                 drawPortraitTextCentered("Connecting...", 400, (GFXfont *)&FiraSans);
-                refreshDisplay(drawSettingsScreen);
-                
-                WiFi.disconnect();
+                epd_poweron();
+                epd_clear();
+                epd_draw_grayscale_image(epd_full_screen(), framebuffer);
+                epd_poweroff();
+
+                // Always connect with the SSID selected from the scan list and
+                // the password typed in the on-screen password box. Fully stop
+                // the previous/default session first so ESP32 does not reuse
+                // the compile-time WIFI_SSID/WIFI_PASSWORD connection.
+                Serial.printf("Connecting to selected SSID: %s\n", wifi_ssid_input);
+                WiFi.disconnect(true, true);
+                delay(200);
+                WiFi.mode(WIFI_STA);
+                WiFi.setAutoReconnect(true);
+                lastWifiConnected = false;
                 WiFi.begin(wifi_ssid_input, wifi_password_input);
                 
                 // Wait up to 10 seconds
@@ -970,10 +1265,23 @@ static bool handleSettingsTouch(int16_t tx, int16_t ty)
                 }
                 
                 if (WiFi.status() == WL_CONNECTED) {
+                    lastWifiConnected = true;
+                    saveWifiCredentials(wifi_ssid_input, wifi_password_input);
+                    memset(framebuffer, 0xFF, EPD_WIDTH * EPD_HEIGHT / 2);
+                    drawTopStatusBar();
+                    drawPortraitTextCentered("Connected", 400, (GFXfont *)&FiraSans);
+                    epd_poweron();
+                    epd_clear();
+                    epd_draw_grayscale_image(epd_full_screen(), framebuffer);
+                    epd_poweroff();
+                    delay(1200);
+
                     showingSettings = false;
                     show_password_prompt = false;
                     refreshDisplay(drawPortraitHome);
+                    refreshWifiStatusIconArea();
                 } else {
+                    lastWifiConnected = false;
                     // Connection failed screen
                     memset(framebuffer, 0xFF, EPD_WIDTH * EPD_HEIGHT / 2);
                     drawTopStatusBar();
@@ -1093,6 +1401,9 @@ static void drawPortraitHome()
     int32_t sy = startY;
     drawSettingsIcon(sx, sy, icon);
 
+    // Book icon placed directly below the settings icon.
+    drawBookIcon(sx, sy + icon + gap, icon, icon);
+
     int32_t cx = startX + icon + gap;
     int32_t cy = startY;
     // Calculator Icon (Outline, no fill)
@@ -1113,7 +1424,72 @@ static void drawPortraitHome()
     portraitDrawLine(clock_cx, clock_cy, clock_cx - 15, clock_cy - 12, 0x00); // Hour hand
     portraitDrawLine(clock_cx, clock_cy, clock_cx + 25, clock_cy - 15, 0x00); // Minute hand
 
-    portraitDrawRect((PORTRAIT_WIDTH - 180) / 2, PORTRAIT_HEIGHT - 150, 180, 70, 0x00);
+}
+
+static void drawBookLibraryLoadingScreen()
+{
+    memset(framebuffer, 0xFF, EPD_WIDTH * EPD_HEIGHT / 2);
+    drawTopStatusBar();
+    drawPortraitTextCentered("Loading Books...", 360, (GFXfont *)&FiraSans);
+}
+
+static void drawBookLibraryScreen()
+{
+    memset(framebuffer, 0xFF, EPD_WIDTH * EPD_HEIGHT / 2);
+    drawTopStatusBar();
+
+    drawPortraitTextCentered("Book Library", 102, (GFXfont *)&FiraSans);
+
+    if (book_count <= 0) {
+        drawPortraitTextInRectCenteredScaled(book_library_status,
+                                             34,
+                                             250,
+                                             PORTRAIT_WIDTH - 68,
+                                             80,
+                                             (GFXfont *)&FiraSans,
+                                             0.72f);
+        return;
+    }
+
+    char summary[48];
+    snprintf(summary, sizeof(summary), "%d of %d books", book_count, book_total);
+    drawPortraitTextInRectCenteredScaled(summary, 54, 130, PORTRAIT_WIDTH - 108, 40, (GFXfont *)&FiraSans, 0.58f);
+
+    const int32_t listX = 28;
+    const int32_t listY = 185;
+    const int32_t rowH = 68;
+    const int32_t listW = PORTRAIT_WIDTH - 56;
+
+    for (int i = 0; i < book_count; ++i) {
+        const int32_t y = listY + i * rowH;
+        portraitDrawRect(listX, y, listW, rowH - 8, 0x00);
+
+        char titleLine[112];
+        snprintf(titleLine, sizeof(titleLine), "%d. %s", i + 1, book_items[i].title);
+        drawPortraitTextInRectCenteredScaled(titleLine,
+                                             listX + 10,
+                                             y + 4,
+                                             listW - 20,
+                                             30,
+                                             (GFXfont *)&FiraSans,
+                                             0.55f);
+
+        char metaLine[96];
+        if (book_items[i].category[0] != '\0' && book_items[i].author[0] != '\0') {
+            snprintf(metaLine, sizeof(metaLine), "%s  %s", book_items[i].category, book_items[i].author);
+        } else if (book_items[i].category[0] != '\0') {
+            snprintf(metaLine, sizeof(metaLine), "%s", book_items[i].category);
+        } else {
+            snprintf(metaLine, sizeof(metaLine), "ID %ld", (long)book_items[i].id);
+        }
+        drawPortraitTextInRectCenteredScaled(metaLine,
+                                             listX + 10,
+                                             y + 32,
+                                             listW - 20,
+                                             24,
+                                             (GFXfont *)&FiraSans,
+                                             0.42f);
+    }
 }
 
 static void drawAnalogClockScreen()
@@ -1284,41 +1660,35 @@ static void expandAndClipCalcRefreshRect(int32_t *x, int32_t *y, int32_t *w, int
 
 static void refreshCalculatorResultArea(const char *previousExpression)
 {
-    char previous[sizeof(calcExpression)];
-    snprintf(previous, sizeof(previous), "%s", previousExpression ? previousExpression : calcExpression);
+    (void)previousExpression;
 
-    int32_t oldX = 0, oldY = 0, oldW = 0, oldH = 0;
-    int32_t newX = 0, newY = 0, newW = 0, newH = 0;
-    calcExpressionTextBounds(previous, &oldX, &oldY, &oldW, &oldH);
-    calcExpressionTextBounds(calcExpression, &newX, &newY, &newW, &newH);
+    // Any calculator update redraws the whole result/digit area.  This is a
+    // little larger than the old text-bounds-only refresh, but it guarantees
+    // every changed value/operator/backspace result is visibly refreshed and
+    // prevents stale digit remnants on the e-paper panel.
+    const int32_t margin = CALC_DIGITS_REFRESH_MARGIN;
+    int32_t refreshX = CALC_DIGITS_X - margin;
+    int32_t refreshY = CALC_DIGITS_Y - margin;
+    int32_t refreshW = CALC_DIGITS_W + margin * 2;
+    int32_t refreshH = CALC_DIGITS_H + margin * 2;
 
-    int32_t refreshX = oldX < newX ? oldX : newX;
-    int32_t refreshY = oldY < newY ? oldY : newY;
-    int32_t oldRight = oldX + oldW;
-    int32_t newRight = newX + newW;
-    int32_t oldBottom = oldY + oldH;
-    int32_t newBottom = newY + newH;
-    int32_t refreshRight = oldRight > newRight ? oldRight : newRight;
-    int32_t refreshBottom = oldBottom > newBottom ? oldBottom : newBottom;
-    int32_t refreshW = refreshRight - refreshX;
-    int32_t refreshH = refreshBottom - refreshY;
-    expandAndClipCalcRefreshRect(&refreshX, &refreshY, &refreshW, &refreshH);
-    refreshY = CALC_DIGITS_Y;
-    refreshH = CALC_DIGITS_H;
+    Rect_t area = portraitRectToPhysicalRect(refreshX, refreshY, refreshW, refreshH);
 
-    if (refreshW <= 0 || refreshH <= 0) {
-        return;
-    }
+    epd_poweron();
+    // First wipe the physical result area to pure white. This happens before
+    // drawing/copying the new result so number/operator updates do not blend
+    // with stale pixels from the previous calculator display value.
+    epd_push_pixels(area, 80, 1);
+    epd_push_pixels(area, 80, 1);
 
     drawCalculatorResultArea();
-    Rect_t area = portraitRectToPhysicalRect(refreshX, refreshY, refreshW, refreshH);
     uint8_t *areaBuffer = copyPhysicalAreaFromFramebuffer(area);
     if (!areaBuffer) {
+        epd_poweroff();
         return;
     }
-    epd_poweron();
-    // Wipe once with white color to clear previous characters cleanly, then draw the text once to maintain perfect solid black and crisp white (steady color, no graying)
-    epd_push_pixels(area, 50, 1);
+
+    // Now write the updated result framebuffer into the already-cleared area.
     epd_draw_grayscale_image(area, areaBuffer);
     epd_poweroff();
     free(areaBuffer);
@@ -1518,7 +1888,7 @@ static void refreshDisplayExtended(void (*drawFn)(), bool use_black_refresh)
     // content area below it, first black and then white, to reduce ghosting
     // without blinking the top bar.
     Rect_t contentArea = portraitRectToPhysicalRect(0, TOP_STATUS_BAR_H, PORTRAIT_WIDTH, PORTRAIT_HEIGHT - TOP_STATUS_BAR_H);
-    const int32_t refreshTime = use_black_refresh ? 50 : 100;
+    const int32_t refreshTime = use_black_refresh ? 60 : 120;
     const int32_t wipeCycles = use_black_refresh ? 1 : 2;
     for (int32_t i = 0; i < wipeCycles; ++i) {
         epd_push_pixels(contentArea, refreshTime, 0); // Black wipe below top bar
@@ -1562,11 +1932,45 @@ static void refreshWifiPasswordArea()
     }
 
     epd_poweron();
-    epd_push_pixels(passwordArea, 60, 1); // White wipe only the password box area
+    // Partial e-paper updates can retain faint remnants of previous text
+    // (especially the long "Enter Password..." placeholder). Use a small
+    // black/white conditioning cycle, confined to the password box, before
+    // drawing the updated framebuffer region.
+    for (int32_t i = 0; i < 2; ++i) {
+        epd_push_pixels(passwordArea, 60, 0); // Black wipe only the password box area
+        epd_push_pixels(passwordArea, 60, 1); // White wipe only the password box area
+    }
+    epd_push_pixels(passwordArea, 60, 1); // Extra white pulse to clear residue
     epd_draw_grayscale_image(passwordArea, passwordBuffer);
     epd_poweroff();
 
     free(passwordBuffer);
+}
+
+static void refreshContentUrlArea()
+{
+    drawContentUrlInputBox();
+
+    const int32_t margin = 4;
+    Rect_t urlArea = portraitRectToPhysicalRect(CONTENT_URL_BOX_X - margin,
+                                                CONTENT_URL_BOX_Y - margin,
+                                                CONTENT_URL_BOX_W + margin * 2,
+                                                CONTENT_URL_BOX_H + margin * 2);
+    uint8_t *urlBuffer = copyPhysicalAreaFromFramebuffer(urlArea);
+    if (!urlBuffer) {
+        return;
+    }
+
+    epd_poweron();
+    for (int32_t i = 0; i < 2; ++i) {
+        epd_push_pixels(urlArea, 60, 0);
+        epd_push_pixels(urlArea, 60, 1);
+    }
+    epd_push_pixels(urlArea, 60, 1);
+    epd_draw_grayscale_image(urlArea, urlBuffer);
+    epd_poweroff();
+
+    free(urlBuffer);
 }
 
 static void refreshWifiKeyboardArea()
@@ -1598,6 +2002,59 @@ static void refreshWifiKeyboardArea()
     epd_poweroff();
 
     free(keyboardBuffer);
+}
+
+static void refreshContentKeyboardArea()
+{
+    // Redraw the full content settings framebuffer in memory so the keyboard
+    // labels match the new kb_mode, but only wipe/update the keyboard rectangle
+    // on the EPD. This preserves the entered URL plus SAVE/CLEAR controls.
+    drawContentSettingsScreen();
+
+    const int32_t keyboardMargin = 12;
+    const int32_t keyboardY = WIFI_KBD_START_Y - keyboardMargin;
+    const int32_t keyboardBottom = wifiKeyboardRowY(WIFI_KBD_ACTION_ROW) + WIFI_KBD_KEY_H + keyboardMargin;
+    const int32_t keyboardH = keyboardBottom - keyboardY;
+    Rect_t keyboardArea = portraitRectToPhysicalRect(0, keyboardY, PORTRAIT_WIDTH, keyboardH);
+    uint8_t *keyboardBuffer = copyPhysicalAreaFromFramebuffer(keyboardArea);
+    if (!keyboardBuffer) {
+        return;
+    }
+
+    epd_poweron();
+    for (int32_t i = 0; i < 3; ++i) {
+        epd_push_pixels(keyboardArea, 80, 0);
+        epd_push_pixels(keyboardArea, 80, 1);
+    }
+    epd_push_pixels(keyboardArea, 80, 1);
+    epd_draw_grayscale_image(keyboardArea, keyboardBuffer);
+    epd_poweroff();
+
+    free(keyboardBuffer);
+}
+
+static void refreshWifiStatusIconArea()
+{
+    // Redraw the status bar in the framebuffer so the WiFi icon reflects the
+    // current connection state, then update only the icon/tap region on the EPD.
+    drawTopStatusBar();
+
+    Rect_t wifiIconArea = portraitRectToPhysicalRect(PORTRAIT_WIDTH - 150, 0, 70, TOP_STATUS_BAR_H);
+    uint8_t *wifiIconBuffer = copyPhysicalAreaFromFramebuffer(wifiIconArea);
+    if (!wifiIconBuffer) {
+        return;
+    }
+
+    epd_poweron();
+    // Explicitly wipe the old WiFi icon before drawing the updated connected /
+    // disconnected icon. Multiple white pulses help remove e-paper remnants.
+    for (int32_t i = 0; i < 3; ++i) {
+        epd_push_pixels(wifiIconArea, 70, 1); // Clear only the WiFi icon region
+    }
+    epd_draw_grayscale_image(wifiIconArea, wifiIconBuffer);
+    epd_poweroff();
+
+    free(wifiIconBuffer);
 }
 
 static bool pointInRect(int32_t px, int32_t py, int32_t rx, int32_t ry, int32_t rw, int32_t rh)
@@ -1656,6 +2113,13 @@ static bool touchHitsSettingsTile(int16_t tx, int16_t ty)
     return touchHitsPortraitRect(tx, ty, settingsX, HOME_ICON_START_Y, HOME_ICON_SIZE, HOME_ICON_SIZE);
 }
 
+static bool touchHitsBookTile(int16_t tx, int16_t ty)
+{
+    const int32_t bookX = homeIconStartX();
+    const int32_t bookY = HOME_ICON_START_Y + HOME_ICON_SIZE + HOME_ICON_GAP;
+    return touchHitsPortraitRect(tx, ty, bookX, bookY, HOME_ICON_SIZE, HOME_ICON_SIZE);
+}
+
 static bool touchHitsWifiStatusIcon(int16_t tx, int16_t ty)
 {
     // Tap area centered on the top status bar's WiFi icon (PORTRAIT_WIDTH - 136, y = 10)
@@ -1676,17 +2140,326 @@ struct _point {
     {4, EPD_WIDTH / 2 - 60, EPD_HEIGHT - 80, 120, 80}
 };
 
+static void processTouchRelease(int16_t x, int16_t y)
+{
+    if ((showingClock || showingCalculator || showingSettings || showingContentSettings || showingBookLibrary) && touchHitsHomeStatusIcon(x, y)) {
+        showingClock = false;
+        showingCalculator = false;
+        showingSettings = false;
+        showingContentSettings = false;
+        showingBookLibrary = false;
+        show_password_prompt = false;
+        refreshDisplay(drawPortraitHome);
+        touch_loop_interval = millis() + 300;
+        return;
+    }
+
+    if (showingCalculator && handleCalculatorTouch(x, y)) {
+        touch_loop_interval = millis() + 300;
+        return;
+    }
+
+    if (showingSettings && handleSettingsTouch(x, y)) {
+        touch_loop_interval = millis() + 300;
+        return;
+    }
+
+    if (showingContentSettings && handleContentSettingsTouch(x, y)) {
+        touch_loop_interval = millis() + 300;
+        return;
+    }
+
+    if (!showingClock && !showingCalculator && !showingSettings && !showingContentSettings && !showingBookLibrary && touchHitsSettingsTile(x, y)) {
+        showingContentSettings = true;
+        kb_mode = KB_LOWERCASE;
+        refreshDisplay(drawContentSettingsScreen);
+        touch_loop_interval = millis() + 300;
+        return;
+    }
+
+    if (!showingClock && !showingCalculator && !showingSettings && !showingContentSettings && !showingBookLibrary && touchHitsBookTile(x, y)) {
+        showingBookLibrary = true;
+        book_count = 0;
+        book_total = 0;
+        snprintf(book_library_status, sizeof(book_library_status), "Loading books...");
+        refreshDisplay(drawBookLibraryLoadingScreen);
+        fetchBookLibrary();
+        refreshDisplay(drawBookLibraryScreen);
+        touch_loop_interval = millis() + 300;
+        return;
+    }
+
+    if (!showingClock && !showingCalculator && !showingSettings && !showingContentSettings && !showingBookLibrary && touchHitsCalculatorTile(x, y)) {
+        showingCalculator = true;
+        refreshDisplay(drawCalculatorScreen);
+        touch_loop_interval = millis() + 300;
+        return;
+    }
+
+    if (!showingClock && !showingCalculator && !showingSettings && !showingContentSettings && !showingBookLibrary && touchHitsClockTile(x, y)) {
+        showingClock = true;
+        refreshDisplay(drawAnalogClockScreen);
+        clock_refresh_interval = millis() + 60000;
+        touch_loop_interval = millis() + 300;
+        return;
+    }
+
+    if (!showingSettings && !showingContentSettings && touchHitsWifiStatusIcon(x, y)) {
+        showingClock = false;
+        showingCalculator = false;
+        showingSettings = true;
+        showingContentSettings = false;
+        showingBookLibrary = false;
+        show_password_prompt = false;
+        kb_mode = KB_LOWERCASE;
+        wifi_ssid_input[0] = '\0';
+        wifi_password_input[0] = '\0';
+        refreshDisplay(drawWifiScanningScreen);
+        
+        // Ensure WiFi is in STATION mode, disconnect first, then scan
+        WiFi.mode(WIFI_STA);
+        WiFi.disconnect();
+        delay(100);
+        
+        scanned_count = WiFi.scanNetworks();
+        if (scanned_count > MAX_SCANNED_WIFI) {
+            scanned_count = MAX_SCANNED_WIFI;
+        }
+        if (scanned_count < 0) {
+            scanned_count = 0;
+        }
+        for (int i = 0; i < scanned_count; ++i) {
+            strncpy(scanned_ssids[i], WiFi.SSID(i).c_str(), 32);
+            scanned_ssids[i][32] = '\0';
+        }
+        refreshDisplay(drawSettingsScreen);
+        touch_loop_interval = millis() + 300;
+        return;
+    }
+
+    for (int i = 0; i < sizeof(touchPoint) / sizeof(touchPoint[0]); ++i) {
+        if ((x > touchPoint[i].x && x < (touchPoint[i].x + touchPoint[i].w))
+                && (y > touchPoint[i].y && y < (touchPoint[i].y + touchPoint[i].h))) {
+
+            if ( touchPoint[i].buttonID == 4) {
+
+                Serial.println("Sleep !!!!!!");
+
+                epd_clear();
+
+                delay(1000);
+
+                epd_poweroff_all();
+
+                WiFi.disconnect(true);
+
+                touch.sleep();
+
+                delay(100);
+
+
+                Wire.end();
+
+                Serial.end();
+
+                // Timer wakeup  + gpio wakeup = 388uA , see  https://github.com/Xinyuan-LilyGO/LilyGo-EPD47/issues/144
+                esp_sleep_enable_timer_wakeup(30 * 1000000ULL);
+
+                // BOOT(STR_IO0) Button wakeup 388uA
+                esp_sleep_enable_ext1_wakeup(_BV(0), ESP_EXT1_WAKEUP_ANY_LOW);
+
+                esp_deep_sleep_start();
+            }
+        }
+    }
+
+    touch_loop_interval = millis() + 300;
+}
+
 void WiFiGotIP(WiFiEvent_t event, WiFiEventInfo_t info)
 {
     Serial.println("WiFi connected");
     Serial.println("IP address: ");
     Serial.println(IPAddress(info.got_ip.ip_info.ip.addr));
+    wifiStatusRefreshPending = true;
 }
 
 void timeavailable(struct timeval *t)
 {
     Serial.println("[WiFi]: Got time adjustment from NTP!");
     ntp_synced = true;
+}
+
+static bool loadSavedWifiCredentials()
+{
+    if (!wifiPrefs.begin("wifi", true)) {
+        Serial.println("Failed to open WiFi preferences for reading");
+        return false;
+    }
+
+    String ssid = wifiPrefs.getString("ssid", "");
+    String password = wifiPrefs.getString("password", "");
+    wifiPrefs.end();
+
+    if (ssid.length() == 0) {
+        saved_wifi_ssid[0] = '\0';
+        saved_wifi_password[0] = '\0';
+        return false;
+    }
+
+    snprintf(saved_wifi_ssid, sizeof(saved_wifi_ssid), "%s", ssid.c_str());
+    snprintf(saved_wifi_password, sizeof(saved_wifi_password), "%s", password.c_str());
+    return true;
+}
+
+static void saveWifiCredentials(const char *ssid, const char *password)
+{
+    if (!ssid || ssid[0] == '\0') {
+        return;
+    }
+
+    if (!wifiPrefs.begin("wifi", false)) {
+        Serial.println("Failed to open WiFi preferences for writing");
+        return;
+    }
+
+    wifiPrefs.putString("ssid", ssid);
+    wifiPrefs.putString("password", password ? password : "");
+    wifiPrefs.end();
+
+    snprintf(saved_wifi_ssid, sizeof(saved_wifi_ssid), "%s", ssid);
+    snprintf(saved_wifi_password, sizeof(saved_wifi_password), "%s", password ? password : "");
+    Serial.printf("Saved WiFi credentials for SSID: %s\n", saved_wifi_ssid);
+}
+
+static void loadContentUrl()
+{
+    if (!appPrefs.begin("app", true)) {
+        Serial.println("Failed to open app preferences for reading");
+        saved_content_url[0] = '\0';
+        content_url_input[0] = '\0';
+        return;
+    }
+
+    String url = appPrefs.getString("contentUrl", "");
+    appPrefs.end();
+
+    snprintf(saved_content_url, sizeof(saved_content_url), "%s", url.c_str());
+    snprintf(content_url_input, sizeof(content_url_input), "%s", url.c_str());
+}
+
+static void saveContentUrl()
+{
+    if (!appPrefs.begin("app", false)) {
+        Serial.println("Failed to open app preferences for writing");
+        return;
+    }
+
+    appPrefs.putString("contentUrl", content_url_input);
+    appPrefs.end();
+
+    snprintf(saved_content_url, sizeof(saved_content_url), "%s", content_url_input);
+    Serial.printf("Saved content URL: %s\n", content_url_input);
+}
+
+static void buildBooksApiUrl(char *out, size_t outSize)
+{
+    if (!out || outSize == 0) {
+        return;
+    }
+    out[0] = '\0';
+
+    const char *base = saved_content_url[0] != '\0' ? saved_content_url : content_url_input;
+    if (!base || base[0] == '\0') {
+        return;
+    }
+
+    char normalized[256];
+    snprintf(normalized, sizeof(normalized), "%s", base);
+    size_t len = strlen(normalized);
+    while (len > 0 && normalized[len - 1] == '/') {
+        normalized[len - 1] = '\0';
+        --len;
+    }
+
+    if (strstr(normalized, "/api/books") != NULL) {
+        char separator = strchr(normalized, '?') ? '&' : '?';
+        snprintf(out, outSize, "%s%cpage=1&perPage=%d", normalized, separator, MAX_BOOK_ITEMS);
+    } else {
+        snprintf(out, outSize, "%s/api/books?page=1&perPage=%d", normalized, MAX_BOOK_ITEMS);
+    }
+}
+
+static bool fetchBookLibrary()
+{
+    book_count = 0;
+    book_total = 0;
+
+    if (WiFi.status() != WL_CONNECTED) {
+        snprintf(book_library_status, sizeof(book_library_status), "WiFi not connected");
+        return false;
+    }
+
+    char url[320];
+    buildBooksApiUrl(url, sizeof(url));
+    if (url[0] == '\0') {
+        snprintf(book_library_status, sizeof(book_library_status), "Set Content URL first");
+        return false;
+    }
+
+    Serial.printf("Fetching book library: %s\n", url);
+
+    HTTPClient http;
+    http.setTimeout(10000);
+    if (!http.begin(url)) {
+        snprintf(book_library_status, sizeof(book_library_status), "Bad content URL");
+        return false;
+    }
+
+    int httpCode = http.GET();
+    if (httpCode != HTTP_CODE_OK) {
+        snprintf(book_library_status, sizeof(book_library_status), "HTTP error: %d", httpCode);
+        http.end();
+        return false;
+    }
+
+    String payload = http.getString();
+    http.end();
+
+    JsonDocument doc;
+    DeserializationError err = deserializeJson(doc, payload);
+    if (err) {
+        snprintf(book_library_status, sizeof(book_library_status), "JSON parse failed");
+        Serial.printf("Book JSON parse failed: %s\n", err.c_str());
+        return false;
+    }
+
+    JsonArray items = doc["items"].as<JsonArray>();
+    book_total = doc["total"] | 0;
+    if (items.isNull()) {
+        snprintf(book_library_status, sizeof(book_library_status), "No items in JSON");
+        return false;
+    }
+
+    for (JsonObject item : items) {
+        if (book_count >= MAX_BOOK_ITEMS) {
+            break;
+        }
+        BookListItem &book = book_items[book_count];
+        book.id = item["id"] | 0;
+        snprintf(book.title, sizeof(book.title), "%s", item["title"] | "Untitled");
+        snprintf(book.author, sizeof(book.author), "%s", item["author"] | "");
+        snprintf(book.category, sizeof(book.category), "%s", item["category"] | "");
+        ++book_count;
+    }
+
+    if (book_count <= 0) {
+        snprintf(book_library_status, sizeof(book_library_status), "No books found");
+        return false;
+    }
+
+    snprintf(book_library_status, sizeof(book_library_status), "Loaded %d books", book_count);
+    return true;
 }
 
 
@@ -1709,7 +2482,15 @@ void setup()
     WiFi.disconnect();
     WiFi.onEvent(WiFiGotIP, WiFiEvent_t::ARDUINO_EVENT_WIFI_STA_GOT_IP);
 
-    WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+    if (loadSavedWifiCredentials()) {
+        Serial.printf("Connecting to saved SSID: %s\n", saved_wifi_ssid);
+        WiFi.begin(saved_wifi_ssid, saved_wifi_password);
+    } else {
+        Serial.printf("No saved WiFi credentials, connecting to default SSID: %s\n", WIFI_SSID);
+        WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+    }
+
+    loadContentUrl();
 
     // set notification call-back function
     sntp_set_time_sync_notification_cb( timeavailable );
@@ -1821,6 +2602,7 @@ void setup()
 
     drawPortraitHome();
     epd_draw_grayscale_image(epd_full_screen(), framebuffer);
+    lastWifiConnected = WiFi.status() == WL_CONNECTED;
 
     epd_poweroff();
 
@@ -1842,6 +2624,21 @@ void loop()
         rtc_synced = true;
         // Sync RTC with NTP time
         rtc.hwClockWrite();
+    }
+
+    bool wifiConnected = WiFi.status() == WL_CONNECTED;
+    if (wifiConnected != lastWifiConnected || wifiStatusRefreshPending) {
+        wifiStatusRefreshPending = false;
+        lastWifiConnected = wifiConnected;
+        refreshWifiStatusIconArea();
+    }
+
+    if (!wifiConnected && saved_wifi_ssid[0] != '\0' && millis() > wifi_reconnect_interval) {
+        wifi_reconnect_interval = millis() + 5000;
+        Serial.printf("WiFi disconnected, retrying saved SSID: %s\n", saved_wifi_ssid);
+        WiFi.disconnect();
+        WiFi.mode(WIFI_STA);
+        WiFi.begin(saved_wifi_ssid, saved_wifi_password);
     }
 
     // Auto page refresh timer that triggers every 150s (150000ms) to clear ghosting and refresh active view using black refresh
@@ -1873,124 +2670,36 @@ void loop()
         }
         int16_t  x, y;
 
-        if (!digitalRead(TOUCH_INT)) {
-            touchWasPressed = false;
-            return;
-        }
-
         uint8_t touched = touch.getPoint(&x, &y, 1);
         if (touched) {
-            if (touchWasPressed) {
-                touch_loop_interval = millis() + 80;
-                return;
-            }
             touchWasPressed = true;
-
-            if ((showingClock || showingCalculator || showingSettings) && touchHitsHomeStatusIcon(x, y)) {
-                showingClock = false;
-                showingCalculator = false;
-                showingSettings = false;
-                show_password_prompt = false;
-                refreshDisplay(drawPortraitHome);
-                touch_loop_interval = millis() + 300;
-                return;
+            if (!touchLatchActive) {
+                touchLatchActive = true;
+                latchedTouchX = x;
+                latchedTouchY = y;
             }
 
-            if (showingCalculator && handleCalculatorTouch(x, y)) {
-                touch_loop_interval = millis() + 300;
-                return;
-            }
-
-            if (showingSettings && handleSettingsTouch(x, y)) {
-                touch_loop_interval = millis() + 300;
-                return;
-            }
-
-            if (!showingClock && !showingCalculator && !showingSettings && touchHitsCalculatorTile(x, y)) {
-                showingCalculator = true;
-                refreshDisplay(drawCalculatorScreen);
-                touch_loop_interval = millis() + 300;
-                return;
-            }
-
-            if (!showingClock && !showingCalculator && !showingSettings && touchHitsClockTile(x, y)) {
-                showingClock = true;
-                refreshDisplay(drawAnalogClockScreen);
-                clock_refresh_interval = millis() + 60000;
-                touch_loop_interval = millis() + 300;
-                return;
-            }
-
-            if (!showingSettings && touchHitsWifiStatusIcon(x, y)) {
-                showingClock = false;
-                showingCalculator = false;
-                showingSettings = true;
-                show_password_prompt = false;
-                kb_mode = KB_LOWERCASE;
-                wifi_ssid_input[0] = '\0';
-                wifi_password_input[0] = '\0';
-                refreshDisplay(drawWifiScanningScreen);
-                
-                // Ensure WiFi is in STATION mode, disconnect first, then scan
-                WiFi.mode(WIFI_STA);
-                WiFi.disconnect();
-                delay(100);
-                
-                scanned_count = WiFi.scanNetworks();
-                if (scanned_count > MAX_SCANNED_WIFI) {
-                    scanned_count = MAX_SCANNED_WIFI;
-                }
-                if (scanned_count < 0) {
-                    scanned_count = 0;
-                }
-                for (int i = 0; i < scanned_count; ++i) {
-                    strncpy(scanned_ssids[i], WiFi.SSID(i).c_str(), 32);
-                    scanned_ssids[i][32] = '\0';
-                }
-                refreshDisplay(drawSettingsScreen);
-                touch_loop_interval = millis() + 300;
-                return;
-            }
-
-            for (int i = 0; i < sizeof(touchPoint) / sizeof(touchPoint[0]); ++i) {
-                if ((x > touchPoint[i].x && x < (touchPoint[i].x + touchPoint[i].w))
-                        && (y > touchPoint[i].y && y < (touchPoint[i].y + touchPoint[i].h))) {
-
-                    if ( touchPoint[i].buttonID == 4) {
-
-                        Serial.println("Sleep !!!!!!");
-
-                        epd_clear();
-
-                        delay(1000);
-
-                        epd_poweroff_all();
-
-                        WiFi.disconnect(true);
-
-                        touch.sleep();
-
-                        delay(100);
-
-
-                        Wire.end();
-
-                        Serial.end();
-
-                        // Timer wakeup  + gpio wakeup = 388uA , see  https://github.com/Xinyuan-LilyGO/LilyGo-EPD47/issues/144
-                        esp_sleep_enable_timer_wakeup(30 * 1000000ULL);
-
-                        // BOOT(STR_IO0) Button wakeup 388uA
-                        esp_sleep_enable_ext1_wakeup(_BV(0), ESP_EXT1_WAKEUP_ANY_LOW);
-
-                        esp_deep_sleep_start();
-
-                    }
-
-                }
-            }
+            // Keep polling while the finger is down, but do not update any key
+            // yet. The latched key is processed once below, after release.
+            touch_loop_interval = millis() + 40;
+            return;
         } else {
+            if (touchWasPressed && touchLatchActive) {
+                touchWasPressed = false;
+                touchLatchActive = false;
+
+                // Debounce the release edge so GT911/noisy interrupt transitions
+                // cannot produce two password characters for one physical tap.
+                if (millis() - lastTouchReleaseTime > 120) {
+                    lastTouchReleaseTime = millis();
+                    processTouchRelease(latchedTouchX, latchedTouchY);
+                } else {
+                    touch_loop_interval = millis() + 120;
+                }
+                return;
+            }
             touchWasPressed = false;
+            touchLatchActive = false;
         }
         touch_loop_interval = millis() + 300;
     }

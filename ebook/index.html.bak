@@ -1,0 +1,200 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <title>Ebook</title>
+  <link rel="stylesheet" href="css/style.css">
+  <style>[v-cloak] { display: none; }</style>
+</head>
+<body>
+  <div id="app" v-cloak>
+    <!-- Home Dashboard -->
+    <section v-show="currentPage === 'home'" class="page home-page">
+      <div class="hero">
+        <h2>📖 Ebook</h2>
+        <p>你的个人电子书库</p>
+      </div>
+      <div class="home-grid">
+        <div class="home-card" v-for="p in pages" :key="p.id" @click="goPage(p.id)">
+          <div class="home-icon">{{ p.icon }}</div>
+          <div class="home-label">{{ p.name }}</div>
+        </div>
+      </div>
+      <div class="home-books" v-if="books.length">
+        <h3>📚 最近阅读</h3>
+        <div class="list">
+          <div class="list-item" v-for="book in books.slice(0, 5)" @click="openBook(book)">
+            <div class="list-icon">{{ book.emoji }}</div>
+            <div class="list-body">
+              <h3>{{ book.title }}</h3>
+              <div class="sub">{{ book.author }}</div>
+            </div>
+            <span class="list-tag">{{ book.category }}</span>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Library -->
+    <section v-show="currentPage === 'library'" class="page">
+       <h2>📖 书库 <span class="count-badge">{{ books.length }}</span></h2>
+      <div v-if="loading" class="loading">加载中...</div>
+      <div v-if="error" class="error">{{ error }}</div>
+      <div class="list">
+        <div class="list-item" v-for="book in books" @click="openBook(book)">
+          <div class="list-icon">{{ book.emoji }}</div>
+          <div class="list-body">
+            <h3>{{ book.title }}</h3>
+            <div class="sub">{{ book.author }}</div>
+          </div>
+          <span class="list-tag">{{ book.category }}</span>
+        </div>
+      </div>
+    </section>
+
+    <!-- Voice Library -->
+    <section v-show="currentPage === 'voice'" class="page">
+       <h2>🎧 有声书库 <span class="count-badge">{{ voiceStories.length }}</span></h2>
+      <div v-if="loading" class="loading">加载中...</div>
+      <div v-if="error" class="error">{{ error }}</div>
+      <div v-if="playingStory" class="player">
+        <div class="player-info">
+          <strong>正在播放: {{ playingStory.title }}</strong>
+          <div class="player-status">状态: {{ speakingStatus }}</div>
+        </div>
+        <button class="btn-sm" @click="stopStory">停止播放</button>
+      </div>
+      <div class="list">
+        <div class="list-item" v-for="story in voiceStories" @click="playStory(story)">
+          <div class="list-icon">🔊</div>
+          <div class="list-body">
+            <h3>{{ story.title }}</h3>
+            <div class="sub">{{ story.author }}</div>
+          </div>
+          <span class="list-tag">{{ story.category }}</span>
+        </div>
+      </div>
+    </section>
+
+    <!-- Poem Recitation -->
+    <section v-show="currentPage === 'poems'" class="page">
+       <h2>📜 古詩朗讀 <span class="count-badge">{{ poems.length }}</span></h2>
+      <div v-if="loading" class="loading">加载中...</div>
+      <div v-if="error" class="error">{{ error }}</div>
+      <div v-if="playingPoem" class="player">
+        <div class="player-info">
+          <strong>{{ playingPoem.title }} - {{ playingPoem.author }}</strong>
+          <div class="player-status">状态: {{ speakingStatus }}</div>
+        </div>
+        <div class="poem-content">{{ playingPoem.content }}</div>
+        <button class="btn-sm" @click="stopPoem">停止朗讀</button>
+      </div>
+      <div class="list">
+        <div class="list-item" v-for="poem in poems" @click="playPoem(poem)">
+          <div class="list-icon">🏮</div>
+          <div class="list-body">
+            <h3>{{ poem.title }}</h3>
+            <div class="sub">{{ poem.author }} · {{ poem.dynasty }}</div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Clock & Weather Page -->
+    <section v-show="currentPage === 'clock'" class="page clock-page">
+      <h2>🕐 本地时钟</h2>
+
+      <div class="clock-section">
+        <div class="clock-card">
+          <div id="clock-canvas-container" class="clock-canvas-wrap"></div>
+          <div class="clock-digital">
+            <div class="clock-time">{{ clockTime }}</div>
+            <div class="clock-date">{{ clockDate }}</div>
+            <div class="clock-city" v-if="clockCity">📍 {{ clockCity }}</div>
+          </div>
+        </div>
+      </div>
+
+      <div class="clock-section">
+        <div class="section-title">🌤 当地天气</div>
+        <div v-if="weatherLoading" class="loading">获取天气中...</div>
+        <div v-if="weatherError" class="error">{{ weatherError }}</div>
+        <div v-if="weatherData" class="weather-display">
+          <div class="weather-main">
+            <span class="weather-temp">{{ weatherData.temp }}°C</span>
+            <span class="weather-desc">{{ weatherData.desc }}</span>
+            <span class="weather-icon-big">{{ weatherData.icon }}</span>
+          </div>
+          <div class="weather-details">
+            <span>💧 湿度 {{ weatherData.humidity }}%</span>
+            <span>🌬 风速 {{ weatherData.wind }} km/h</span>
+          </div>
+          <div class="weather-city">{{ weatherData.city }}</div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Games Page -->
+    <section v-show="currentPage === 'games'" class="page">
+      <h2>🎮 小遊戲</h2>
+      <div class="guide">
+        <strong>操作指南:</strong><br>
+        • 養成遊戲: 点击屏幕讓植物生長<br>
+        • 俄羅斯方塊: ← → ↓ 移動, ↑ 旋轉<br>
+        • 太空射擊: ← → ↓ 移動, ↑ 或 空格鍵 射擊
+      </div>
+      <div class="grid">
+        <div class="list-item" @click="launchGame('nurture')">
+          <div class="list-icon">🌱</div>
+          <div class="list-body"><h3>養成遊戲</h3><div class="desc">照顧你的小植物</div></div>
+        </div>
+        <div class="list-item" @click="launchGame('tetris')">
+          <div class="list-icon">🧱</div>
+          <div class="list-body"><h3>俄羅斯方塊</h3><div class="desc">經典方塊消除</div></div>
+        </div>
+        <div class="list-item" @click="launchGame('shooter')">
+          <div class="list-icon">🚀</div>
+          <div class="list-body"><h3>太空射擊</h3><div class="desc">太空擊敗敵人</div></div>
+        </div>
+      </div>
+      <div v-if="currentGame" class="game-container">
+        <div><strong>正在遊玩: {{ currentGame }}</strong></div>
+        <div id="game-canvas-container" style="display: flex; justify-content: center; margin: 0.8rem 0;"></div>
+        <button class="btn-sm" @click="stopGame">退出遊戲</button>
+      </div>
+    </section>
+
+    <!-- Reader -->
+    <section v-show="currentPage === 'reader'" class="page">
+      <div v-if="loading" class="loading">加载中...</div>
+      <div v-else-if="error" class="error">{{ error }}</div>
+      <div v-else-if="selectedBook">
+        <button class="btn-back" @click="goPage('library')">← 返回书库</button>
+        <div class="reader-header">
+          <h2>{{ selectedBook.title }}</h2>
+          <p class="sub">{{ selectedBook.author }} · {{ selectedBook.category }}</p>
+        </div>
+        <div class="reader-content" v-html="renderContent(selectedBook.content)"></div>
+      </div>
+      <div v-else class="empty">请先从书库选择一本书 📖</div>
+    </section>
+
+    <!-- Bottom Tab Bar -->
+    <nav class="bottom-tabs">
+      <a v-for="p in pages" :key="p.id" href="#" :class="{ active: currentPage === p.id }" @click.prevent="goPage(p.id)">
+        <span class="tab-icon">
+          {{ p.icon }}
+          <span v-if="p.id === 'library'" class="tab-count">{{ books.length }}</span>
+          <span v-if="p.id === 'voice'" class="tab-count">{{ voiceStories.length }}</span>
+          <span v-if="p.id === 'poems'" class="tab-count">{{ poems.length }}</span>
+        </span>
+        <span class="tab-label">{{ p.name }}</span>
+      </a>
+    </nav>
+  </div>
+
+  <script src="js/petite-vue.iife.js"></script>
+  <script src="js/app.js"></script>
+</body>
+</html>
