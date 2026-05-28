@@ -191,6 +191,7 @@ static const CalcButton calcButtons[] = {
 
 static void drawPortraitHome();
 static void drawAnalogClockScreen();
+static void refreshClockTimeArea();
 static void drawCalculatorScreen();
 static void drawSettingsMenuScreen();
 static void drawSettingsScreen();
@@ -216,6 +217,7 @@ static void refreshContentKeyboardArea();
 static void refreshWifiStatusIconArea();
 static void refreshBookLibraryListArea();
 static void refreshBookReaderContentArea();
+static uint8_t *copyPhysicalAreaFromFramebuffer(Rect_t area);
 static bool fetchSelectedBook(int32_t bookId);
 static void buildBookDetailApiUrl(char *out, size_t outSize, int32_t bookId);
 static void buildContentApiUrl(char *out, size_t outSize, const char *endpoint, const char *query = NULL);
@@ -881,6 +883,17 @@ static void drawWifiPasswordInputBox()
 
 static void drawPortraitTextInRectCenteredScaled(const char *text, int32_t rx, int32_t ry, int32_t rw, int32_t rh, const GFXfont *font, float scale)
 {
+    // EPD_HEIGHT is 540 and EPD_WIDTH is 960.
+    // In low-level font.c, write_mode is hardcoded to clip any pixel drawn at yy >= EPD_HEIGHT (540).
+    // In our portrait layout, yy is vertical and goes up to 960 (PORTRAIT_HEIGHT).
+    // Therefore, any key/text with ry >= 540 gets completely clipped (drawn as empty/blank).
+    // To bypass this low-level library constraint, we temporarily shift the vertical coordinate (ry)
+    // up into the safe [0, 500] range, call writeln(), and then shift the pixels back down when copying!
+    int32_t shiftY = 0;
+    if (ry >= 400) {
+        shiftY = ry - 200; // Shift up into safe bounds
+    }
+
     const size_t textBufferSize = (EPD_WIDTH / 2) * PORTRAIT_HEIGHT;
     uint8_t *textBuffer = (uint8_t *)ps_calloc(sizeof(uint8_t), textBufferSize);
     if (!textBuffer) {
@@ -897,7 +910,7 @@ static void drawPortraitTextInRectCenteredScaled(const char *text, int32_t rx, i
     int32_t vrw = (int32_t)(rw / scale);
     int32_t vrh = (int32_t)(rh / scale);
     int32_t vrx = rx + (rw - vrw) / 2;
-    int32_t vry = ry + (rh - vrh) / 2;
+    int32_t vry = (ry - shiftY) + (rh - vrh) / 2;
 
     int32_t cursorX = vrx + (vrw - w) / 2 - x1;
     
@@ -923,7 +936,9 @@ static void drawPortraitTextInRectCenteredScaled(const char *text, int32_t rx, i
     float invScale = 1.0f / scale;
 
     for (int32_t yy = startY; yy < endY; ++yy) {
-        float srcYf = cy + (yy - cy) * invScale;
+        int32_t srcY = yy - shiftY;
+        if (srcY < 0 || srcY >= PORTRAIT_HEIGHT) continue;
+        float srcYf = (cy - shiftY) + (srcY - (cy - shiftY)) * invScale;
         int32_t srcY0 = (int32_t)floorf(srcYf);
         int32_t srcY1 = (int32_t)ceilf(srcYf);
         
@@ -2501,6 +2516,119 @@ static void drawBookReaderScreen()
     drawBookReaderContentPage();
 }
 
+// Chinese weekday names
+static const char *weekdayZh[] = {"星期日", "星期一", "星期二", "星期三", "星期四", "星期五", "星期六"};
+
+// Translate English weather description to Chinese
+static const char *translateWeatherDescZh(const char *en)
+{
+    if (!en || en[0] == '\0') return "天气";
+    // Check common English weather descriptions from wttr.in
+    if (strstr(en, "Sunny") || strstr(en, "Clear")) return "晴";
+    if (strstr(en, "Partly cloudy")) return "多云";
+    if (strstr(en, "Cloudy") || strstr(en, "Overcast")) return "阴";
+    if (strstr(en, "Light rain") || strstr(en, "Drizzle")) return "小雨";
+    if (strstr(en, "Heavy rain")) return "大雨";
+    if (strstr(en, "Rain")) return "雨";
+    if (strstr(en, "Thunderstorm") || strstr(en, "Storm")) return "雷暴";
+    if (strstr(en, "Light snow")) return "小雪";
+    if (strstr(en, "Heavy snow")) return "大雪";
+    if (strstr(en, "Snow") || strstr(en, "Ice")) return "雪";
+    if (strstr(en, "Fog") || strstr(en, "Haze")) return "雾";
+    if (strstr(en, "Mist")) return "薄雾";
+    if (strstr(en, "Windy")) return "大风";
+    if (strstr(en, "Hot")) return "炎热";
+    if (strstr(en, "Cold")) return "寒冷";
+    if (strstr(en, "Warm")) return "温暖";
+    // Chinese descriptions pass through unchanged
+    if (en[0] >= 0x80) return en;
+    return en; // fallback: show original English
+}
+
+// Translate English city name to Chinese
+static const char *translateCityZh(const char *en)
+{
+    if (!en || en[0] == '\0') return "深圳";
+    // Chinese names pass through unchanged (check UTF-8 lead byte)
+    if ((unsigned char)en[0] >= 0x80) return en;
+    // Build lowercase version for case-insensitive comparison
+    char lowerEn[64];
+    strncpy(lowerEn, en, sizeof(lowerEn) - 1);
+    lowerEn[sizeof(lowerEn) - 1] = '\0';
+    for (int i = 0; lowerEn[i]; i++) lowerEn[i] = tolower((unsigned char)lowerEn[i]);
+    
+    // Common city translations - case insensitive
+    if (strcmp(lowerEn, "shenzhen") == 0) return "深圳";
+    if (strcmp(lowerEn, "shanghai") == 0) return "上海";
+    if (strcmp(lowerEn, "beijing") == 0) return "北京";
+    if (strcmp(lowerEn, "guangzhou") == 0) return "广州";
+    if (strcmp(lowerEn, "hangzhou") == 0) return "杭州";
+    if (strcmp(lowerEn, "chengdu") == 0) return "成都";
+    if (strcmp(lowerEn, "wuhan") == 0) return "武汉";
+    if (strcmp(lowerEn, "nanjing") == 0) return "南京";
+    if (strcmp(lowerEn, "tianjin") == 0) return "天津";
+    if (strcmp(lowerEn, "chongqing") == 0) return "重庆";
+    if (strcmp(lowerEn, "suzhou") == 0) return "苏州";
+    if (strcmp(lowerEn, "xiamen") == 0) return "厦门";
+    if (strcmp(lowerEn, "qingdao") == 0) return "青岛";
+    if (strcmp(lowerEn, "harbin") == 0) return "哈尔滨";
+    if (strcmp(lowerEn, "hong kong") == 0 || strcmp(lowerEn, "hongkong") == 0) return "香港";
+    if (strcmp(lowerEn, "macau") == 0) return "澳门";
+    if (strcmp(lowerEn, "taipei") == 0) return "台北";
+    if (strcmp(lowerEn, "sanya") == 0) return "三亚";
+    if (strcmp(lowerEn, "haikou") == 0) return "海口";
+    if (strcmp(lowerEn, "dalian") == 0) return "大连";
+    if (strcmp(lowerEn, "kunming") == 0) return "昆明";
+    if (strcmp(lowerEn, "fuzhou") == 0) return "福州";
+    if (strcmp(lowerEn, "hefei") == 0) return "合肥";
+    if (strcmp(lowerEn, "jinan") == 0) return "济南";
+    if (strcmp(lowerEn, "lanzhou") == 0) return "兰州";
+    if (strcmp(lowerEn, "guiyang") == 0) return "贵阳";
+    if (strcmp(lowerEn, "nanning") == 0) return "南宁";
+    if (strcmp(lowerEn, "changsha") == 0) return "长沙";
+    if (strcmp(lowerEn, "zhengzhou") == 0) return "郑州";
+    if (strcmp(lowerEn, "shenyang") == 0) return "沈阳";
+    // Ma Tso Lung variants from wttr.in / local API
+    if (strstr(lowerEn, "matsolurg") || strstr(lowerEn, "matsolung") || strstr(lowerEn, "ma tso") || strstr(lowerEn, "matso") || strstr(lowerEn, "matslung") || strstr(lowerEn, "mats lung")) return "马草垄";
+    return en; // fallback: show original English name
+}
+
+// Clock layout constants - bigger clock, weather pushed lower
+static const int32_t CLOCK_CENTER_Y = 260;
+static const int32_t CLOCK_RADIUS = 175;
+static const int32_t CLOCK_TIME_Y = 455;
+static const int32_t CLOCK_DATE_Y = 505;
+static const int32_t CLOCK_LOC_TITLE_Y = 560;
+static const int32_t CLOCK_LOC_CITY_Y = 600;
+static const int32_t CLOCK_WEATHER_TITLE_Y = 660;
+static const int32_t CLOCK_WEATHER_BOX_Y = 700;
+static const int32_t CLOCK_WEATHER_BOX_H = 210;
+// Partial refresh area: time + date region (below clock face, above location)
+static const int32_t CLOCK_TIME_AREA_Y = CLOCK_TIME_Y - 10;
+static const int32_t CLOCK_TIME_AREA_H = 90;
+
+static void drawClockChineseDateLine(const struct tm &timeinfo)
+{
+    // Keep Chinese date format, but draw the numeric portions with a smaller
+    // ASCII font. Drawing the full mixed string through the Chinese renderer
+    // makes ASCII digits too large and causes overlap on the e-paper screen.
+    const int32_t y = CLOCK_DATE_Y;
+    char yearBuf[8];
+    char monthBuf[4];
+    char dayBuf[4];
+    snprintf(yearBuf, sizeof(yearBuf), "%04d", timeinfo.tm_year + 1900);
+    snprintf(monthBuf, sizeof(monthBuf), "%02d", timeinfo.tm_mon + 1);
+    snprintf(dayBuf, sizeof(dayBuf), "%02d", timeinfo.tm_mday);
+
+    drawPortraitTextInRectCenteredScaled(yearBuf, 88, y, 112, 38, (GFXfont *)&FiraSans, 0.50f);
+    drawUtf8ChineseTextInRectSingleWidth("年", 188, y, 34, 38);
+    drawPortraitTextInRectCenteredScaled(monthBuf, 218, y, 58, 38, (GFXfont *)&FiraSans, 0.50f);
+    drawUtf8ChineseTextInRectSingleWidth("月", 272, y, 34, 38);
+    drawPortraitTextInRectCenteredScaled(dayBuf, 302, y, 58, 38, (GFXfont *)&FiraSans, 0.50f);
+    drawUtf8ChineseTextInRectSingleWidth("日", 356, y, 34, 38);
+    drawUtf8ChineseTextInRectSingleWidth(weekdayZh[timeinfo.tm_wday], 398, y, 120, 38);
+}
+
 static void drawAnalogClockScreen()
 {
     memset(framebuffer, 0xFF, EPD_WIDTH * EPD_HEIGHT / 2);
@@ -2515,20 +2643,19 @@ static void drawAnalogClockScreen()
         timeinfo.tm_sec = 0;
     }
 
-    // Section 1: 本地时钟, matching the web clock page structure.
-    drawUtf8ChineseTextInRectSingleWidth("本地时钟", 34, 66, PORTRAIT_WIDTH - 68, 38);
-
+    // Section 1: 本地时钟
+    // Larger analog clock face
     const int32_t cx = PORTRAIT_WIDTH / 2;
-    const int32_t cy = 260;
-    const int32_t r = 130;
+    const int32_t cy = CLOCK_CENTER_Y;
+    const int32_t r = CLOCK_RADIUS;
     portraitDrawCircle(cx, cy, r, 0x00);
     portraitDrawCircle(cx, cy, r - 1, 0x00);
 
     for (int i = 0; i < 60; ++i) {
         float a = (i * 6.0f - 90.0f) * DEG_TO_RAD;
-        int32_t outerX = cx + (int32_t)(cosf(a) * (r - 10));
-        int32_t outerY = cy + (int32_t)(sinf(a) * (r - 10));
-        int32_t innerR = (i % 5 == 0) ? r - 28 : r - 18;
+        int32_t outerX = cx + (int32_t)(cosf(a) * (r - 12));
+        int32_t outerY = cy + (int32_t)(sinf(a) * (r - 12));
+        int32_t innerR = (i % 5 == 0) ? r - 32 : r - 20;
         int32_t innerX = cx + (int32_t)(cosf(a) * innerR);
         int32_t innerY = cy + (int32_t)(sinf(a) * innerR);
         drawThickPortraitLine(innerX, innerY, outerX, outerY, (i % 5 == 0) ? 3 : 1, 0x00);
@@ -2536,54 +2663,150 @@ static void drawAnalogClockScreen()
 
     for (int hour = 1; hour <= 12; ++hour) {
         float a = (hour * 30.0f - 90.0f) * DEG_TO_RAD;
-        int32_t tx = cx + (int32_t)(cosf(a) * (r - 40));
-        int32_t ty = cy + (int32_t)(sinf(a) * (r - 40));
+        int32_t tx = cx + (int32_t)(cosf(a) * (r - 48));
+        int32_t ty = cy + (int32_t)(sinf(a) * (r - 48));
         char hourLabel[3];
         snprintf(hourLabel, sizeof(hourLabel), "%d", hour);
-        drawPortraitTextInRectCenteredScaled(hourLabel, tx - 12, ty - 12, 24, 24, (GFXfont *)&FiraSans, 0.30f);
+        drawPortraitTextInRectCenteredScaled(hourLabel, tx - 16, ty - 16, 32, 32, (GFXfont *)&FiraSans, 0.38f);
     }
 
     float minuteAngle = ((timeinfo.tm_min + timeinfo.tm_sec / 60.0f) * 6.0f - 90.0f) * DEG_TO_RAD;
     float hourAngle = (((timeinfo.tm_hour % 12) + timeinfo.tm_min / 60.0f) * 30.0f - 90.0f) * DEG_TO_RAD;
-    int32_t hourX = cx + (int32_t)(cosf(hourAngle) * 60);
-    int32_t hourY = cy + (int32_t)(sinf(hourAngle) * 60);
-    int32_t minuteX = cx + (int32_t)(cosf(minuteAngle) * 95);
-    int32_t minuteY = cy + (int32_t)(sinf(minuteAngle) * 95);
-    drawThickPortraitLine(cx, cy, hourX, hourY, 6, 0x00);
-    drawThickPortraitLine(cx, cy, minuteX, minuteY, 4, 0x00);
-    portraitFillCircle(cx, cy, 8, 0x00);
+    int32_t hourX = cx + (int32_t)(cosf(hourAngle) * 80);
+    int32_t hourY = cy + (int32_t)(sinf(hourAngle) * 80);
+    int32_t minuteX = cx + (int32_t)(cosf(minuteAngle) * 125);
+    int32_t minuteY = cy + (int32_t)(sinf(minuteAngle) * 125);
+    drawThickPortraitLine(cx, cy, hourX, hourY, 7, 0x00);
+    drawThickPortraitLine(cx, cy, minuteX, minuteY, 5, 0x00);
+    portraitFillCircle(cx, cy, 10, 0x00);
+
+    // Digital time display - ASCII only, no Chinese mixing
+    char timeLine[16];
+    snprintf(timeLine, sizeof(timeLine), "%02d:%02d", timeinfo.tm_hour, timeinfo.tm_min);
+    drawPortraitTextInRectCenteredScaled(timeLine, 34, CLOCK_TIME_Y, PORTRAIT_WIDTH - 68, 48, (GFXfont *)&FiraSans, 0.80f);
+
+    // Date display - Chinese format with smaller numeric glyphs.
+    drawClockChineseDateLine(timeinfo);
+
+    // Separator line between clock and location
+    portraitDrawLine(34, CLOCK_LOC_TITLE_Y - 8, PORTRAIT_WIDTH - 34, CLOCK_LOC_TITLE_Y - 8, 0x00);
+
+    // Section 2: Current location - translate to Chinese. Title intentionally removed.
+    const char *cityZh = translateCityZh(clock_weather.city[0] != '\0' ? clock_weather.city : "Shenzhen");
+    drawUtf8ChineseTextInRectSingleWidth(cityZh, 34, CLOCK_LOC_TITLE_Y + 14, PORTRAIT_WIDTH - 68, 46);
+
+    // Separator line between location and weather
+    portraitDrawLine(34, CLOCK_WEATHER_TITLE_Y - 8, PORTRAIT_WIDTH - 34, CLOCK_WEATHER_TITLE_Y - 8, 0x00);
+
+    // Section 3: Weather. Title intentionally removed.
+    const int32_t weatherBoxY = CLOCK_WEATHER_TITLE_Y + 16;
+    const int32_t weatherBoxH = 220;
+    portraitDrawRect(34, weatherBoxY, PORTRAIT_WIDTH - 68, weatherBoxH, 0x00);
+    portraitDrawRect(38, weatherBoxY + 4, PORTRAIT_WIDTH - 76, weatherBoxH - 8, 0x00);
+
+    if (clock_weather.loaded) {
+        const char *descZh = translateWeatherDescZh(clock_weather.desc);
+
+        // Temperature on left, weather desc on right
+        char tempBuf[16];
+        snprintf(tempBuf, sizeof(tempBuf), "%s", clock_weather.temp[0] ? clock_weather.temp : "--");
+        drawPortraitTextInRectCenteredScaled(tempBuf, 52, weatherBoxY + 22, 70, 38, (GFXfont *)&FiraSans, 0.50f);
+        // Degree symbol and C
+        drawUtf8ChineseTextInRectSingleWidth("度", 116, weatherBoxY + 20, 44, 40);
+
+        // Weather description
+        drawUtf8ChineseTextInRectSingleWidth(descZh, 174, weatherBoxY + 20, 170, 40);
+
+        // Humidity and wind use separate Chinese labels + ASCII values to keep one consistent size and avoid overlap.
+        drawUtf8ChineseTextInRectSingleWidth("湿度", 70, weatherBoxY + 86, 90, 30);
+        drawPortraitTextInRectCenteredScaled(clock_weather.humidity[0] ? clock_weather.humidity : "--", 178, weatherBoxY + 84, 70, 34, (GFXfont *)&FiraSans, 0.38f);
+        drawPortraitTextInRectCenteredScaled("%", 240, weatherBoxY + 84, 36, 34, (GFXfont *)&FiraSans, 0.34f);
+
+        drawUtf8ChineseTextInRectSingleWidth("风速", 70, weatherBoxY + 136, 90, 30);
+        drawPortraitTextInRectCenteredScaled(clock_weather.wind[0] ? clock_weather.wind : "--", 178, weatherBoxY + 134, 70, 34, (GFXfont *)&FiraSans, 0.38f);
+        drawUtf8ChineseTextInRectSingleWidth("公里/时", 252, weatherBoxY + 136, 150, 30);
+    } else {
+        drawUtf8ChineseTextInRectSingleWidth(clock_weather.status, 48, weatherBoxY + 50, PORTRAIT_WIDTH - 96, 60);
+    }
+}
+
+// Partial refresh for the clock time/date area only (avoids full screen redraw)
+static void refreshClockTimeArea()
+{
+    // Clear the time/date region in framebuffer
+    portraitFillRect(34, CLOCK_TIME_AREA_Y, PORTRAIT_WIDTH - 68, CLOCK_TIME_AREA_H, 0xFF);
+
+    // Redraw time and date in the cleared region
+    time_t now = time(NULL);
+    struct tm timeinfo;
+    if (now < 100000 || !localtime_r(&now, &timeinfo)) {
+        memset(&timeinfo, 0, sizeof(timeinfo));
+        timeinfo.tm_hour = 10;
+        timeinfo.tm_min = 10;
+        timeinfo.tm_sec = 0;
+    }
 
     char timeLine[16];
     snprintf(timeLine, sizeof(timeLine), "%02d:%02d", timeinfo.tm_hour, timeinfo.tm_min);
-    drawPortraitTextInRectCenteredScaled(timeLine, 34, 405, PORTRAIT_WIDTH - 68, 48, (GFXfont *)&FiraSans, 0.80f);
+    drawPortraitTextInRectCenteredScaled(timeLine, 34, CLOCK_TIME_Y, PORTRAIT_WIDTH - 68, 50, (GFXfont *)&FiraSans, 0.85f);
 
-    char dateLine[48];
-    snprintf(dateLine, sizeof(dateLine), "%04d-%02d-%02d", timeinfo.tm_year + 1900, timeinfo.tm_mon + 1, timeinfo.tm_mday);
-    drawPortraitTextInRectCenteredScaled(dateLine, 34, 452, PORTRAIT_WIDTH - 68, 28, (GFXfont *)&FiraSans, 0.42f);
+    drawClockChineseDateLine(timeinfo);
 
-    // Section 2: 当前位置.
-    drawUtf8ChineseTextInRectSingleWidth("当前位置", 34, 488, PORTRAIT_WIDTH - 68, 32);
-
-    const char *city = clock_weather.city[0] != '\0' ? clock_weather.city : "Shenzhen";
-    drawUtf8ChineseTextInRectSingleWidth(city, 34, 522, PORTRAIT_WIDTH - 68, 36);
-
-    // Section 3: 当地天气.
-    drawUtf8ChineseTextInRectSingleWidth("当地天气", 34, 570, PORTRAIT_WIDTH - 68, 32);
-    portraitDrawRect(34, 610, PORTRAIT_WIDTH - 68, 150, 0x00);
-    portraitDrawRect(38, 614, PORTRAIT_WIDTH - 76, 142, 0x00);
-
-    if (clock_weather.loaded) {
-        char tempLine[80];
-        snprintf(tempLine, sizeof(tempLine), "%sC  %s", clock_weather.temp[0] ? clock_weather.temp : "--", clock_weather.desc[0] ? clock_weather.desc : "Weather");
-        drawPortraitTextInRectCenteredScaled(tempLine, 48, 626, PORTRAIT_WIDTH - 96, 44, (GFXfont *)&FiraSans, 0.66f);
-
-        char detailLine[96];
-        snprintf(detailLine, sizeof(detailLine), "Humidity %s%%   Wind %s km/h", clock_weather.humidity[0] ? clock_weather.humidity : "--", clock_weather.wind[0] ? clock_weather.wind : "--");
-        drawPortraitTextInRectCenteredScaled(detailLine, 48, 678, PORTRAIT_WIDTH - 96, 28, (GFXfont *)&FiraSans, 0.36f);
-        drawUtf8ChineseTextInRectSingleWidth(city, 48, 712, PORTRAIT_WIDTH - 96, 28);
-    } else {
-        drawPortraitTextInRectCenteredScaled(clock_weather.status, 48, 660, PORTRAIT_WIDTH - 96, 44, (GFXfont *)&FiraSans, 0.50f);
+    // Also redraw the analog clock hands (only the area inside the clock face)
+    const int32_t cx = PORTRAIT_WIDTH / 2;
+    const int32_t cy = CLOCK_CENTER_Y;
+    const int32_t r = CLOCK_RADIUS;
+    // Clear the inner clock face area for hand redraw
+    portraitFillRect(cx - r + 10, cy - r + 10, 2 * r - 20, 2 * r - 20, 0xFF);
+    // Redraw the clock circle outline
+    portraitDrawCircle(cx, cy, r, 0x00);
+    portraitDrawCircle(cx, cy, r - 1, 0x00);
+    // Redraw tick marks
+    for (int i = 0; i < 60; ++i) {
+        float a = (i * 6.0f - 90.0f) * DEG_TO_RAD;
+        int32_t outerX = cx + (int32_t)(cosf(a) * (r - 12));
+        int32_t outerY = cy + (int32_t)(sinf(a) * (r - 12));
+        int32_t innerR = (i % 5 == 0) ? r - 32 : r - 20;
+        int32_t innerX = cx + (int32_t)(cosf(a) * innerR);
+        int32_t innerY = cy + (int32_t)(sinf(a) * innerR);
+        drawThickPortraitLine(innerX, innerY, outerX, outerY, (i % 5 == 0) ? 3 : 1, 0x00);
     }
+    // Redraw hour numbers
+    for (int hour = 1; hour <= 12; ++hour) {
+        float a = (hour * 30.0f - 90.0f) * DEG_TO_RAD;
+        int32_t tx = cx + (int32_t)(cosf(a) * (r - 48));
+        int32_t ty = cy + (int32_t)(sinf(a) * (r - 48));
+        char hourLabel[3];
+        snprintf(hourLabel, sizeof(hourLabel), "%d", hour);
+        drawPortraitTextInRectCenteredScaled(hourLabel, tx - 16, ty - 16, 32, 32, (GFXfont *)&FiraSans, 0.38f);
+    }
+    // Redraw hands
+    float minuteAngle = ((timeinfo.tm_min + timeinfo.tm_sec / 60.0f) * 6.0f - 90.0f) * DEG_TO_RAD;
+    float hourAngle = (((timeinfo.tm_hour % 12) + timeinfo.tm_min / 60.0f) * 30.0f - 90.0f) * DEG_TO_RAD;
+    int32_t hourX = cx + (int32_t)(cosf(hourAngle) * 80);
+    int32_t hourY = cy + (int32_t)(sinf(hourAngle) * 80);
+    int32_t minuteX = cx + (int32_t)(cosf(minuteAngle) * 125);
+    int32_t minuteY = cy + (int32_t)(sinf(minuteAngle) * 125);
+    drawThickPortraitLine(cx, cy, hourX, hourY, 7, 0x00);
+    drawThickPortraitLine(cx, cy, minuteX, minuteY, 5, 0x00);
+    portraitFillCircle(cx, cy, 10, 0x00);
+
+    // Refresh the combined area (clock face + time/date) on the EPD
+    const int32_t refreshY = cy - r - 5;
+    const int32_t refreshH = CLOCK_TIME_AREA_Y + CLOCK_TIME_AREA_H - refreshY;
+    Rect_t area = portraitRectToPhysicalRect(10, refreshY, PORTRAIT_WIDTH - 20, refreshH);
+    uint8_t *areaBuffer = copyPhysicalAreaFromFramebuffer(area);
+    if (!areaBuffer) return;
+
+    epd_poweron();
+    for (int32_t i = 0; i < 2; ++i) {
+        epd_push_pixels(area, 70, 0);
+        epd_push_pixels(area, 70, 1);
+    }
+    epd_push_pixels(area, 70, 1);
+    epd_draw_grayscale_image(area, areaBuffer);
+    epd_poweroff();
+    free(areaBuffer);
 }
 
 static void drawCalculatorScreen()
@@ -3842,7 +4065,22 @@ static bool fetchClockWeatherInfo()
             delay(2500);
         }
     }
+
     if (!weatherOk) {
+        // Retry without a city query. The server can auto-detect location and this
+        // avoids failures caused by spaces/non-ASCII city names in the query.
+        buildContentApiUrl(url, sizeof(url), "/api/weather", NULL);
+        for (int attempt = 1; attempt <= 2 && !weatherOk; ++attempt) {
+            payload = "";
+            snprintf(clock_weather.status, sizeof(clock_weather.status), "Weather fallback %d/2...", attempt);
+            weatherOk = httpGetString(url, payload, clock_weather.status, sizeof(clock_weather.status), 45000);
+            if (!weatherOk && attempt < 2) {
+                delay(2500);
+            }
+        }
+    }
+    if (!weatherOk) {
+        snprintf(clock_weather.status, sizeof(clock_weather.status), "天气获取失败");
         return false;
     }
 
@@ -4214,7 +4452,8 @@ void loop()
     }
 
     if (showingClock && !showingCalculator && millis() > clock_refresh_interval) {
-        refreshDisplay(drawAnalogClockScreen);
+        // Use partial refresh for regular 1-minute updates (only refreshes clock face + time area)
+        refreshClockTimeArea();
         clock_refresh_interval = millis() + 60000;
     }
 
