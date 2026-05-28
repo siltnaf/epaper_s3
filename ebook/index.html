@@ -257,45 +257,34 @@
 
     <!-- Clock & Weather Page -->
     <section v-show="currentPage === 'clock'" class="page clock-page">
-      <!-- Section 1: Local Clock -->
+      <h2>🕐 本地时钟</h2>
+
       <div class="clock-section">
-        <div class="section-title">🕐 本地时钟</div>
         <div class="clock-card">
           <div id="clock-canvas-container" class="clock-canvas-wrap"></div>
           <div class="clock-digital">
             <div class="clock-time">{{ clockTime }}</div>
             <div class="clock-date">{{ clockDate }}</div>
+            <div class="clock-city" v-if="clockCity">📍 {{ clockCity }}</div>
           </div>
         </div>
       </div>
 
-      <!-- Section 2: Current Location -->
-      <div class="clock-section">
-        <div class="section-title">📍 当前位置</div>
-        <div class="location-display">
-          <div v-if="locationMessage" class="location-message">{{ locationMessage }}</div>
-          <div v-else class="location-loading">获取位置中...</div>
-        </div>
-      </div>
-
-      <!-- Section 3: Weather -->
       <div class="clock-section">
         <div class="section-title">🌤 当地天气</div>
         <div v-if="weatherLoading" class="loading">获取天气中...</div>
-        <div class="weather-display">
-          <div v-if="weatherData" class="weather-main">
+        <div v-if="weatherError" class="error">{{ weatherError }}</div>
+        <div v-if="weatherData" class="weather-display">
+          <div class="weather-main">
             <span class="weather-temp">{{ weatherData.temp }}°C</span>
             <span class="weather-desc">{{ weatherData.desc }}</span>
             <span class="weather-icon-big">{{ weatherData.icon }}</span>
           </div>
-          <div v-if="weatherData" class="weather-details">
+          <div class="weather-details">
             <span>💧 湿度 {{ weatherData.humidity }}%</span>
             <span>🌬 风速 {{ weatherData.wind }} km/h</span>
           </div>
-          <div v-if="weatherData" class="weather-city">{{ weatherData.city }}</div>
-          <div v-if="!weatherLoading && !weatherData" class="weather-empty">
-            {{ weatherError || '暂时无法获取天气，请稍后再试' }}
-          </div>
+          <div class="weather-city">{{ weatherData.city }}</div>
         </div>
       </div>
     </section>

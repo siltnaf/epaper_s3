@@ -32,6 +32,7 @@
 #include <TouchDrvGT911.hpp>    //Arduino IDE -> Library manager -> Install SensorLib v0.19     
 #include <SensorPCF8563.hpp>
 #include <WiFi.h>
+#include <WiFiClientSecure.h>
 #include <HTTPClient.h>
 #include <Preferences.h>
 #include <ArduinoJson.h>
@@ -40,6 +41,7 @@
 #include "calc_key_icons.h"
 #include "wifi_key_icons.h"
 #include "book_nav_icons.h"
+#include "chinese_font.h"
 #include <math.h>
 #include <time.h>
 
@@ -80,6 +82,10 @@ bool showingSettings = false;
 bool showingSettingsMenu = false;
 bool showingContentSettings = false;
 bool showingBookLibrary = false;
+bool showingBookReader = false;
+bool showingSdMenu = false;
+bool showingSdFolder = false;
+char sd_status_message[96] = "";
 bool touchWasPressed = false;
 bool lastWifiConnected = false;
 volatile bool wifiStatusRefreshPending = false;
@@ -109,7 +115,29 @@ struct BookListItem {
 BookListItem book_items[MAX_BOOK_ITEMS];
 int book_count = 0;
 int book_total = 0;
+int32_t book_current_page = 1;
 char book_library_status[96] = "Tap book icon to load library";
+int32_t selected_book_id = 0;
+char selected_book_title[80] = "";
+char selected_book_author[40] = "";
+char selected_book_category[40] = "";
+char book_reader_status[96] = "Select a book";
+String selected_book_content;
+int32_t book_reader_page = 0;
+int32_t book_reader_total_pages = 1;
+
+struct ClockWeatherInfo {
+    char city[64];
+    char timezone[64];
+    char temp[16];
+    char desc[48];
+    char humidity[16];
+    char wind[16];
+    char status[96];
+    bool loaded;
+};
+
+ClockWeatherInfo clock_weather = {{0}, {0}, {0}, {0}, {0}, {0}, "Tap clock to sync", false};
 
 enum KeyboardMode {
     KB_LOWERCASE,
@@ -168,7 +196,14 @@ static void drawSettingsMenuScreen();
 static void drawSettingsScreen();
 static void drawContentSettingsScreen();
 static void drawBookLibraryScreen();
+static void drawBookReaderScreen();
 static void drawBookLibraryLoadingScreen();
+static void drawSdMenuScreen();
+static void drawSdFolderScreen();
+static void formatSdCard();
+static void drawSdStatusArea();
+static void refreshDisplayWhiteOnly(void (*drawFn)());
+static void refreshSdStatusArea();
 static void drawWifiScanningScreen();
 static void drawBookIcon(int32_t x, int32_t y, int32_t w, int32_t h);
 static void refreshDisplay(void (*drawFn)());
@@ -179,6 +214,23 @@ static void refreshContentUrlArea();
 static void refreshWifiKeyboardArea();
 static void refreshContentKeyboardArea();
 static void refreshWifiStatusIconArea();
+static void refreshBookLibraryListArea();
+static void refreshBookReaderContentArea();
+static bool fetchSelectedBook(int32_t bookId);
+static void buildBookDetailApiUrl(char *out, size_t outSize, int32_t bookId);
+static void buildContentApiUrl(char *out, size_t outSize, const char *endpoint, const char *query = NULL);
+static bool httpGetString(const char *url, String &payload, char *status, size_t statusSize, uint32_t timeoutMs = 10000);
+static bool fetchClockWeatherInfo();
+static void updateBookReaderPagination();
+static void copyJsonString(char *dest, size_t destSize, JsonObject item, const char *key, const char *fallback);
+static void copyBookTitle(char *dest, size_t destSize, JsonObject item);
+static void decodeJsonUnicodeEscapes(char *text);
+static void drawUtf8ChineseTextInRectSingleWidth(const char *text, int32_t rx, int32_t ry, int32_t rw, int32_t rh);
+static void drawUtf8ChineseTextLeftAligned(const char *text, int32_t rx, int32_t ry, int32_t rh);
+static void drawUtf8ChineseTextLeftAlignedClipped(const char *text, int32_t rx, int32_t ry, int32_t rw, int32_t rh);
+static void drawUtf8ChineseTextLeftAlignedClippedNarrow(const char *text, int32_t rx, int32_t ry, int32_t rw, int32_t rh);
+static void drawAsciiSingleWidthCharReader(char ch, int32_t x, int32_t y);
+static void drawUtf8ChineseTextRightAligned(const char *text, int32_t rx_end, int32_t ry, int32_t rh);
 static bool pointInRect(int32_t px, int32_t py, int32_t rx, int32_t ry, int32_t rw, int32_t rh);
 static bool portraitPointFromTouch(int16_t tx, int16_t ty, int32_t *px, int32_t *py, bool alternate);
 static bool touchHitsPortraitRect(int16_t tx, int16_t ty, int32_t rx, int32_t ry, int32_t rw, int32_t rh);
@@ -269,9 +321,25 @@ static const int32_t CONTENT_URL_BOX_Y = 150;
 static const int32_t CONTENT_URL_BOX_W = 472;
 static const int32_t CONTENT_URL_BOX_H = 60;
 static const int32_t BOOK_NAV_ICON_SIZE = 64;
-static const int32_t BOOK_NAV_ICON_X = PORTRAIT_WIDTH - BOOK_NAV_ICON_SIZE - 24;
-static const int32_t BOOK_NAV_UP_Y = 118;
-static const int32_t BOOK_NAV_DOWN_Y = PORTRAIT_HEIGHT - BOOK_NAV_ICON_SIZE - 34;
+static const int32_t BOOK_NAV_UP_X = 350;
+static const int32_t BOOK_NAV_UP_Y = 80;
+static const int32_t BOOK_NAV_DOWN_X = 430;
+static const int32_t BOOK_NAV_DOWN_Y = 80;
+static const int32_t BOOK_LIST_X = 22;
+static const int32_t BOOK_LIST_Y = 178;
+static const int32_t BOOK_LIST_ROW_H = 74;
+static const int32_t BOOK_LIST_ROW_BOX_H = 60;
+static const int32_t BOOK_LIST_W = PORTRAIT_WIDTH - 44;
+static const int32_t BOOK_LIST_REFRESH_Y = 168;
+static const int32_t BOOK_LIST_REFRESH_BOTTOM_MARGIN = 8;
+static const int32_t BOOK_READER_CONTENT_X = 24;
+static const int32_t BOOK_READER_CONTENT_Y = 187;
+static const int32_t BOOK_READER_CONTENT_W = PORTRAIT_WIDTH - 48;
+static const int32_t BOOK_READER_LINE_H = 50;
+static const int32_t BOOK_READER_CHARS_PER_LINE = 14;
+static const float BOOK_LIST_FONT_SCALE = 1.21f;
+static const float BOOK_READER_FONT_SCALE = 1.61f;
+static const float BOOK_READER_FONT_X_SCALE = 0.88f; // squared, e-reader-like width
 static const int32_t SETTINGS_MENU_ITEM_X = 54;
 static const int32_t SETTINGS_MENU_ITEM_W = PORTRAIT_WIDTH - 108;
 static const int32_t SETTINGS_MENU_ITEM_H = 86;
@@ -891,6 +959,543 @@ static void drawPortraitTextInRectCenteredScaled(const char *text, int32_t rx, i
     free(textBuffer);
 }
 
+static bool utf8NextCodepoint(const char **cursor, uint32_t *codepoint)
+{
+    const uint8_t *s = (const uint8_t *)(*cursor);
+    if (!s || *s == 0) {
+        return false;
+    }
+
+    if (s[0] < 0x80) {
+        *codepoint = s[0];
+        *cursor += 1;
+        return true;
+    }
+    if ((s[0] & 0xE0) == 0xC0 && (s[1] & 0xC0) == 0x80) {
+        *codepoint = ((uint32_t)(s[0] & 0x1F) << 6) | (uint32_t)(s[1] & 0x3F);
+        *cursor += 2;
+        return true;
+    }
+    if ((s[0] & 0xF0) == 0xE0 && (s[1] & 0xC0) == 0x80 && (s[2] & 0xC0) == 0x80) {
+        *codepoint = ((uint32_t)(s[0] & 0x0F) << 12) | ((uint32_t)(s[1] & 0x3F) << 6) | (uint32_t)(s[2] & 0x3F);
+        *cursor += 3;
+        return true;
+    }
+    if ((s[0] & 0xF8) == 0xF0 && (s[1] & 0xC0) == 0x80 && (s[2] & 0xC0) == 0x80 && (s[3] & 0xC0) == 0x80) {
+        *codepoint = ((uint32_t)(s[0] & 0x07) << 18) | ((uint32_t)(s[1] & 0x3F) << 12) | ((uint32_t)(s[2] & 0x3F) << 6) | (uint32_t)(s[3] & 0x3F);
+        *cursor += 4;
+        return true;
+    }
+
+    *codepoint = '?';
+    *cursor += 1;
+    return true;
+}
+
+static const ChineseGlyph *findChineseGlyph(uint32_t codepoint)
+{
+    int32_t low = 0;
+    int32_t high = ChineseFontGlyphCount - 1;
+    while (low <= high) {
+        int32_t mid = low + (high - low) / 2;
+        uint32_t midCode = ChineseFontGlyphs[mid].codepoint;
+        if (midCode == codepoint) {
+            return &ChineseFontGlyphs[mid];
+        }
+        if (midCode < codepoint) {
+            low = mid + 1;
+        } else {
+            high = mid - 1;
+        }
+    }
+    return NULL;
+}
+
+static int32_t singleWidthTextWidth(const char *text)
+{
+    int32_t width = 0;
+    const char *p = text;
+    uint32_t cp = 0;
+    while (utf8NextCodepoint(&p, &cp)) {
+        if (cp < 0x80) {
+            width += (int32_t)ceilf(((cp == ' ') ? 8.0f : 12.0f) * BOOK_LIST_FONT_SCALE);
+        } else {
+            const ChineseGlyph *glyph = findChineseGlyph(cp);
+            width += glyph ? ((int32_t)ceilf(glyph->width * BOOK_LIST_FONT_SCALE) + (int32_t)ceilf(2.0f * BOOK_LIST_FONT_SCALE)) : (int32_t)ceilf(14.0f * BOOK_LIST_FONT_SCALE);
+        }
+    }
+    return width;
+}
+
+static void drawAsciiSingleWidthChar(char ch, int32_t x, int32_t y)
+{
+    // Use the existing vector font path for ASCII, but keep it thin by only
+    // copying the darkest pixels. This is used only for small prefixes like
+    // "1. "; Chinese glyphs below are always drawn pixel-for-pixel.
+    char label[2] = {ch, '\0'};
+    drawPortraitTextInRectCenteredScaled(label,
+                                         x,
+                                         y - (int32_t)ceilf(18.0f * BOOK_LIST_FONT_SCALE),
+                                         (int32_t)ceilf(12.0f * BOOK_LIST_FONT_SCALE),
+                                         (int32_t)ceilf(36.0f * BOOK_LIST_FONT_SCALE),
+                                         (GFXfont *)&FiraSans,
+                                         BOOK_LIST_FONT_SCALE);
+}
+
+static void drawAsciiSingleWidthCharReader(char ch, int32_t x, int32_t y)
+{
+    char label[2] = {ch, '\0'};
+    drawPortraitTextInRectCenteredScaled(label,
+                                         x,
+                                         y - (int32_t)ceilf(18.0f * BOOK_READER_FONT_SCALE),
+                                         (int32_t)ceilf(12.0f * BOOK_READER_FONT_SCALE),
+                                         (int32_t)ceilf(36.0f * BOOK_READER_FONT_SCALE),
+                                         (GFXfont *)&FiraSans,
+                                         BOOK_READER_FONT_SCALE);
+}
+
+static char punctuationFallbackChar(uint32_t cp)
+{
+    switch (cp) {
+    case 0x3002: return '.';  // 。
+    case 0xFF0C: return ',';  // ，
+    case 0x3001: return ',';  // 、
+    case 0xFF1A: return ':';  // ：
+    case 0xFF1B: return ';';  // ；
+    case 0xFF01: return '!';  // ！
+    case 0xFF1F: return '?';  // ？
+    case 0x201C: return '"'; // “
+    case 0x201D: return '"'; // ”
+    case 0x2018: return '\''; // ‘
+    case 0x2019: return '\''; // ’
+    case 0xFF08: return '(';  // （
+    case 0xFF09: return ')';  // ）
+    case 0x300A: return '<';  // 《
+    case 0x300B: return '>';  // 》
+    case 0x2014: return '-';  // —
+    case 0x2026: return '.';  // …
+    default: return '\0';
+    }
+}
+
+static int32_t chineseTextCodepointAdvance(uint32_t cp)
+{
+    if (cp == '\r' || cp == '\n') {
+        return 0;
+    }
+    if (cp < 0x80) {
+        return (int32_t)ceilf(((cp == ' ') ? 8.0f : 12.0f) * BOOK_LIST_FONT_SCALE);
+    }
+
+    const ChineseGlyph *glyph = findChineseGlyph(cp);
+    if (glyph) {
+        return (int32_t)ceilf(glyph->width * BOOK_LIST_FONT_SCALE) + (int32_t)ceilf(2.0f * BOOK_LIST_FONT_SCALE);
+    }
+
+    char fallback = punctuationFallbackChar(cp);
+    return (int32_t)ceilf((fallback ? 10.0f : 14.0f) * BOOK_LIST_FONT_SCALE);
+}
+
+static int32_t chineseTextCodepointAdvanceReader(uint32_t cp)
+{
+    if (cp == '\r' || cp == '\n') {
+        return 0;
+    }
+    if (cp < 0x80) {
+        return (int32_t)ceilf(((cp == ' ') ? 8.0f : 12.0f) * BOOK_READER_FONT_SCALE);
+    }
+
+    const ChineseGlyph *glyph = findChineseGlyph(cp);
+    if (glyph) {
+        return (int32_t)ceilf(glyph->width * BOOK_READER_FONT_SCALE * BOOK_READER_FONT_X_SCALE) + (int32_t)ceilf(2.0f * BOOK_READER_FONT_SCALE);
+    }
+
+    char fallback = punctuationFallbackChar(cp);
+    return (int32_t)ceilf((fallback ? 10.0f : 14.0f) * BOOK_READER_FONT_SCALE);
+}
+
+static int32_t chineseTextCodepointAdvanceNarrow(uint32_t cp)
+{
+    return chineseTextCodepointAdvanceReader(cp);
+}
+
+static void drawChineseGlyphScaled(const ChineseGlyph *glyph, int32_t x, int32_t y, int32_t clipRight, int32_t clipBottom)
+{
+    if (!glyph) {
+        return;
+    }
+
+    const int32_t scaledW = (int32_t)ceilf(glyph->width * BOOK_LIST_FONT_SCALE);
+    const int32_t scaledH = (int32_t)ceilf(glyph->height * BOOK_LIST_FONT_SCALE);
+    for (int32_t dy = 0; dy < scaledH && y + dy < clipBottom; ++dy) {
+        int32_t srcY = (int32_t)floorf(dy / BOOK_LIST_FONT_SCALE);
+        if (srcY < 0) srcY = 0;
+        if (srcY >= glyph->height) srcY = glyph->height - 1;
+        for (int32_t dx = 0; dx < scaledW && x + dx < clipRight; ++dx) {
+            int32_t srcX = (int32_t)floorf(dx / BOOK_LIST_FONT_SCALE);
+            if (srcX < 0) srcX = 0;
+            if (srcX >= glyph->width) srcX = glyph->width - 1;
+            uint8_t packed = ChineseFontBitmap[glyph->offset + srcY * glyph->rowBytes + srcX / 8];
+            if (packed & (0x80 >> (srcX & 7))) {
+                portraitPixel(x + dx, y + dy, 0x00);
+            }
+        }
+    }
+}
+
+static void drawChineseGlyphScaledX(const ChineseGlyph *glyph, int32_t x, int32_t y, int32_t clipRight, int32_t clipBottom, float xScale)
+{
+    if (!glyph) {
+        return;
+    }
+
+    const int32_t scaledW = max((int32_t)1, (int32_t)ceilf(glyph->width * BOOK_READER_FONT_SCALE * xScale));
+    const int32_t scaledH = (int32_t)ceilf(glyph->height * BOOK_READER_FONT_SCALE);
+    for (int32_t dy = 0; dy < scaledH && y + dy < clipBottom; ++dy) {
+        int32_t srcY = (int32_t)floorf(dy / BOOK_READER_FONT_SCALE);
+        if (srcY < 0) srcY = 0;
+        if (srcY >= glyph->height) srcY = glyph->height - 1;
+        for (int32_t dx = 0; dx < scaledW && x + dx < clipRight; ++dx) {
+            int32_t srcX = (int32_t)floorf(dx / (BOOK_READER_FONT_SCALE * xScale));
+            if (srcX < 0) srcX = 0;
+            if (srcX >= glyph->width) srcX = glyph->width - 1;
+            uint8_t packed = ChineseFontBitmap[glyph->offset + srcY * glyph->rowBytes + srcX / 8];
+            if (packed & (0x80 >> (srcX & 7))) {
+                portraitPixel(x + dx, y + dy, 0x00);
+            }
+        }
+    }
+}
+
+static void drawUtf8ChineseTextInRectSingleWidth(const char *text, int32_t rx, int32_t ry, int32_t rw, int32_t rh)
+{
+    if (!text || text[0] == '\0') {
+        return;
+    }
+
+    int32_t textW = singleWidthTextWidth(text);
+    int32_t x = rx + (rw - textW) / 2;
+    if (x < rx + 2) {
+        x = rx + 2;
+    }
+    int32_t scaledFontHeight = (int32_t)ceilf(ChineseFontHeight * BOOK_LIST_FONT_SCALE);
+    int32_t y = ry + (rh - scaledFontHeight) / 2;
+    if (y < ry + 1) {
+        y = ry + 1;
+    }
+
+    const char *p = text;
+    uint32_t cp = 0;
+    while (utf8NextCodepoint(&p, &cp) && x < rx + rw - 2) {
+        if (cp < 0x80) {
+            drawAsciiSingleWidthChar((char)cp, x, y + scaledFontHeight / 2);
+            x += (int32_t)ceilf(((cp == ' ') ? 8.0f : 12.0f) * BOOK_LIST_FONT_SCALE);
+            continue;
+        }
+
+        const ChineseGlyph *glyph = findChineseGlyph(cp);
+        if (!glyph) {
+            x += (int32_t)ceilf(14.0f * BOOK_LIST_FONT_SCALE);
+            continue;
+        }
+
+        drawChineseGlyphScaled(glyph, x, y, rx + rw - 2, ry + rh - 1);
+        x += (int32_t)ceilf(glyph->width * BOOK_LIST_FONT_SCALE) + (int32_t)ceilf(2.0f * BOOK_LIST_FONT_SCALE);
+    }
+}
+
+static void drawUtf8ChineseTextLeftAligned(const char *text, int32_t rx, int32_t ry, int32_t rh)
+{
+    if (!text || text[0] == '\0') {
+        return;
+    }
+
+    int32_t x = rx;
+    int32_t scaledFontHeight = (int32_t)ceilf(ChineseFontHeight * BOOK_LIST_FONT_SCALE);
+    int32_t y = ry + (rh - scaledFontHeight) / 2;
+    if (y < ry + 1) {
+        y = ry + 1;
+    }
+
+    const char *p = text;
+    uint32_t cp = 0;
+    while (utf8NextCodepoint(&p, &cp) && x < PORTRAIT_WIDTH - 2) {
+        if (cp < 0x80) {
+            drawAsciiSingleWidthChar((char)cp, x, y + scaledFontHeight / 2);
+            x += (int32_t)ceilf(((cp == ' ') ? 8.0f : 12.0f) * BOOK_LIST_FONT_SCALE);
+            continue;
+        }
+
+        const ChineseGlyph *glyph = findChineseGlyph(cp);
+        if (!glyph) {
+            x += (int32_t)ceilf(14.0f * BOOK_LIST_FONT_SCALE);
+            continue;
+        }
+
+        drawChineseGlyphScaled(glyph, x, y, PORTRAIT_WIDTH - 2, ry + rh - 1);
+        x += (int32_t)ceilf(glyph->width * BOOK_LIST_FONT_SCALE) + (int32_t)ceilf(2.0f * BOOK_LIST_FONT_SCALE);
+    }
+}
+
+static void drawUtf8ChineseTextLeftAlignedClipped(const char *text, int32_t rx, int32_t ry, int32_t rw, int32_t rh)
+{
+    if (!text || text[0] == '\0' || rw <= 0 || rh <= 0) {
+        return;
+    }
+
+    const int32_t clipRight = min(PORTRAIT_WIDTH - 2, rx + rw);
+    const int32_t clipBottom = min(PORTRAIT_HEIGHT - 1, ry + rh);
+    int32_t x = max((int32_t)0, rx);
+    int32_t scaledFontHeight = (int32_t)ceilf(ChineseFontHeight * BOOK_LIST_FONT_SCALE);
+    int32_t y = ry + (rh - scaledFontHeight) / 2;
+    if (y < ry + 1) {
+        y = ry + 1;
+    }
+
+    const char *p = text;
+    uint32_t cp = 0;
+    while (utf8NextCodepoint(&p, &cp) && x < clipRight) {
+        int32_t advance = 0;
+        if (cp < 0x80) {
+            advance = (int32_t)ceilf(((cp == ' ') ? 8.0f : 12.0f) * BOOK_LIST_FONT_SCALE);
+            if (x + advance > clipRight) {
+                break;
+            }
+            drawAsciiSingleWidthChar((char)cp, x, y + scaledFontHeight / 2);
+            x += advance;
+            continue;
+        }
+
+        const ChineseGlyph *glyph = findChineseGlyph(cp);
+        if (!glyph) {
+            char fallback = punctuationFallbackChar(cp);
+            advance = (int32_t)ceilf((fallback ? 10.0f : 14.0f) * BOOK_LIST_FONT_SCALE);
+            if (x + advance > clipRight) {
+                break;
+            }
+            if (fallback) {
+                drawAsciiSingleWidthChar(fallback, x, y + scaledFontHeight / 2);
+            }
+            x += advance;
+            continue;
+        }
+
+        advance = (int32_t)ceilf(glyph->width * BOOK_LIST_FONT_SCALE) + (int32_t)ceilf(2.0f * BOOK_LIST_FONT_SCALE);
+        if (x + advance > clipRight) {
+            break;
+        }
+        drawChineseGlyphScaled(glyph, x, y, clipRight, clipBottom);
+        x += advance;
+    }
+}
+
+static void drawUtf8ChineseTextLeftAlignedClippedNarrow(const char *text, int32_t rx, int32_t ry, int32_t rw, int32_t rh)
+{
+    if (!text || text[0] == '\0' || rw <= 0 || rh <= 0) {
+        return;
+    }
+
+    const int32_t clipRight = min(PORTRAIT_WIDTH - 2, rx + rw);
+    const int32_t clipBottom = min(PORTRAIT_HEIGHT - 1, ry + rh);
+    int32_t x = max((int32_t)0, rx);
+    int32_t scaledFontHeight = (int32_t)ceilf(ChineseFontHeight * BOOK_READER_FONT_SCALE);
+    int32_t y = ry + (rh - scaledFontHeight) / 2;
+    if (y < ry + 1) {
+        y = ry + 1;
+    }
+
+    const char *p = text;
+    uint32_t cp = 0;
+    while (utf8NextCodepoint(&p, &cp) && x < clipRight) {
+        int32_t advance = chineseTextCodepointAdvanceNarrow(cp);
+        if (x + advance > clipRight) {
+            break;
+        }
+
+        if (cp < 0x80) {
+            drawAsciiSingleWidthCharReader((char)cp, x, y + scaledFontHeight / 2);
+            x += advance;
+            continue;
+        }
+
+        const ChineseGlyph *glyph = findChineseGlyph(cp);
+        if (!glyph) {
+            char fallback = punctuationFallbackChar(cp);
+            if (fallback) {
+                drawAsciiSingleWidthCharReader(fallback, x, y + scaledFontHeight / 2);
+            }
+            x += advance;
+            continue;
+        }
+
+        drawChineseGlyphScaledX(glyph, x, y, clipRight, clipBottom, BOOK_READER_FONT_X_SCALE);
+        x += advance;
+    }
+}
+
+
+static void drawUtf8ChineseTextRightAligned(const char *text, int32_t rx_end, int32_t ry, int32_t rh)
+{
+    if (!text || text[0] == '\0') {
+        return;
+    }
+
+    int32_t textW = singleWidthTextWidth(text);
+    int32_t x = rx_end - textW;
+    if (x < 2) {
+        x = 2;
+    }
+    int32_t scaledFontHeight = (int32_t)ceilf(ChineseFontHeight * BOOK_LIST_FONT_SCALE);
+    int32_t y = ry + (rh - scaledFontHeight) / 2;
+    if (y < ry + 1) {
+        y = ry + 1;
+    }
+
+    const char *p = text;
+    uint32_t cp = 0;
+    while (utf8NextCodepoint(&p, &cp) && x < rx_end) {
+        if (cp < 0x80) {
+            drawAsciiSingleWidthChar((char)cp, x, y + scaledFontHeight / 2);
+            x += (int32_t)ceilf(((cp == ' ') ? 8.0f : 12.0f) * BOOK_LIST_FONT_SCALE);
+            continue;
+        }
+
+        const ChineseGlyph *glyph = findChineseGlyph(cp);
+        if (!glyph) {
+            x += (int32_t)ceilf(14.0f * BOOK_LIST_FONT_SCALE);
+            continue;
+        }
+
+        drawChineseGlyphScaled(glyph, x, y, rx_end, ry + rh - 1);
+        x += (int32_t)ceilf(glyph->width * BOOK_LIST_FONT_SCALE) + (int32_t)ceilf(2.0f * BOOK_LIST_FONT_SCALE);
+    }
+}
+
+static int hexNibble(char ch)
+{
+    if (ch >= '0' && ch <= '9') return ch - '0';
+    if (ch >= 'a' && ch <= 'f') return ch - 'a' + 10;
+    if (ch >= 'A' && ch <= 'F') return ch - 'A' + 10;
+    return -1;
+}
+
+static bool appendUtf8(char *out, size_t outSize, size_t *outLen, uint32_t cp)
+{
+    if (!out || !outLen || outSize == 0) {
+        return false;
+    }
+    if (cp <= 0x7F) {
+        if (*outLen + 1 >= outSize) return false;
+        out[(*outLen)++] = (char)cp;
+    } else if (cp <= 0x7FF) {
+        if (*outLen + 2 >= outSize) return false;
+        out[(*outLen)++] = (char)(0xC0 | (cp >> 6));
+        out[(*outLen)++] = (char)(0x80 | (cp & 0x3F));
+    } else if (cp <= 0xFFFF) {
+        if (*outLen + 3 >= outSize) return false;
+        out[(*outLen)++] = (char)(0xE0 | (cp >> 12));
+        out[(*outLen)++] = (char)(0x80 | ((cp >> 6) & 0x3F));
+        out[(*outLen)++] = (char)(0x80 | (cp & 0x3F));
+    } else {
+        if (*outLen + 4 >= outSize) return false;
+        out[(*outLen)++] = (char)(0xF0 | (cp >> 18));
+        out[(*outLen)++] = (char)(0x80 | ((cp >> 12) & 0x3F));
+        out[(*outLen)++] = (char)(0x80 | ((cp >> 6) & 0x3F));
+        out[(*outLen)++] = (char)(0x80 | (cp & 0x3F));
+    }
+    out[*outLen] = '\0';
+    return true;
+}
+
+static void decodeJsonUnicodeEscapes(char *text)
+{
+    if (!text || !strstr(text, "\\u")) {
+        return;
+    }
+
+    char decoded[96];
+    size_t outLen = 0;
+    decoded[0] = '\0';
+
+    for (size_t i = 0; text[i] != '\0' && outLen < sizeof(decoded) - 1;) {
+        if (text[i] == '\\' && text[i + 1] == 'u') {
+            int h0 = hexNibble(text[i + 2]);
+            int h1 = hexNibble(text[i + 3]);
+            int h2 = hexNibble(text[i + 4]);
+            int h3 = hexNibble(text[i + 5]);
+            if (h0 >= 0 && h1 >= 0 && h2 >= 0 && h3 >= 0) {
+                uint32_t cp = ((uint32_t)h0 << 12) | ((uint32_t)h1 << 8) | ((uint32_t)h2 << 4) | (uint32_t)h3;
+                i += 6;
+
+                // Decode UTF-16 surrogate pairs if they appear in JSON strings.
+                if (cp >= 0xD800 && cp <= 0xDBFF && text[i] == '\\' && text[i + 1] == 'u') {
+                    int l0 = hexNibble(text[i + 2]);
+                    int l1 = hexNibble(text[i + 3]);
+                    int l2 = hexNibble(text[i + 4]);
+                    int l3 = hexNibble(text[i + 5]);
+                    if (l0 >= 0 && l1 >= 0 && l2 >= 0 && l3 >= 0) {
+                        uint32_t low = ((uint32_t)l0 << 12) | ((uint32_t)l1 << 8) | ((uint32_t)l2 << 4) | (uint32_t)l3;
+                        if (low >= 0xDC00 && low <= 0xDFFF) {
+                            cp = 0x10000 + ((cp - 0xD800) << 10) + (low - 0xDC00);
+                            i += 6;
+                        }
+                    }
+                }
+
+                appendUtf8(decoded, sizeof(decoded), &outLen, cp);
+                continue;
+            }
+        }
+
+        decoded[outLen++] = text[i++];
+        decoded[outLen] = '\0';
+    }
+
+    snprintf(text, 80, "%s", decoded);
+}
+
+static void copyJsonString(char *dest, size_t destSize, JsonObject item, const char *key, const char *fallback)
+{
+    if (!dest || destSize == 0) {
+        return;
+    }
+    const char *value = nullptr;
+    if (key) {
+        JsonVariant var = item[key];
+        if (!var.isNull()) {
+            value = var.as<const char*>();
+        }
+    }
+    snprintf(dest, destSize, "%s", (value && value[0] != '\0') ? value : (fallback ? fallback : ""));
+    decodeJsonUnicodeEscapes(dest);
+}
+
+static void copyBookTitle(char *dest, size_t destSize, JsonObject item)
+{
+    if (!dest || destSize == 0) {
+        return;
+    }
+
+    // Since JsonObject::operator[] returns a JsonVariant (which can convert to const char*),
+    // we must retrieve the value as a JsonVariant first to check if the key exists in ArduinoJson.
+    // reference/server.js returns /api/books items as:
+    // { id, title, author, category, created_at }. The Chinese book name is `title`.
+    const char *keys[] = {"title", "name", "chineseName", "chinese_name", "chineseTitle", "chinese_title", "titleZh", "title_zh"};
+    for (size_t i = 0; i < sizeof(keys) / sizeof(keys[0]); ++i) {
+        JsonVariant value = item[keys[i]];
+        if (!value.isNull()) {
+            const char* str = value.as<const char*>();
+            if (str && str[0] != '\0') {
+                snprintf(dest, destSize, "%s", str);
+                decodeJsonUnicodeEscapes(dest);
+                return;
+            }
+        }
+    }
+
+    snprintf(dest, destSize, "Untitled");
+}
+
 static void drawSettingsScreen()
 {
     memset(framebuffer, 0xFF, EPD_WIDTH * EPD_HEIGHT / 2);
@@ -1014,6 +1619,156 @@ static void drawContentUrlInputBox()
                                          0.58f);
 }
 
+static void drawSettingsMenuScreen()
+{
+    memset(framebuffer, 0xFF, EPD_WIDTH * EPD_HEIGHT / 2);
+    drawTopStatusBar();
+
+    drawPortraitTextCentered("Settings", 100, (GFXfont *)&FiraSans);
+
+    // Menu Item 1: Content URL
+    int item1Y = 190;
+    portraitFillRect(34, item1Y, 472, 90, 0xFF);
+    portraitDrawRect(34, item1Y, 472, 90, 0x00);
+    portraitDrawRect(36, item1Y + 2, 468, 86, 0x00);
+    drawPortraitTextInRectCentered("Content URL", 34, item1Y, 340, 90, (GFXfont *)&FiraSans);
+    // Right arrow indicator
+    drawPortraitTextInRectCentered(">", 370, item1Y, 80, 90, (GFXfont *)&FiraSans);
+
+    // Menu Item 2: SD Card
+    int item2Y = 304;
+    portraitFillRect(34, item2Y, 472, 90, 0xFF);
+    portraitDrawRect(34, item2Y, 472, 90, 0x00);
+    portraitDrawRect(36, item2Y + 2, 468, 86, 0x00);
+    drawPortraitTextInRectCentered("SD Card", 34, item2Y, 340, 90, (GFXfont *)&FiraSans);
+    drawPortraitTextInRectCentered(">", 370, item2Y, 80, 90, (GFXfont *)&FiraSans);
+
+    // Menu Item 3: Volume
+    int item3Y = 418;
+    portraitFillRect(34, item3Y, 472, 90, 0xFF);
+    portraitDrawRect(34, item3Y, 472, 90, 0x00);
+    portraitDrawRect(36, item3Y + 2, 468, 86, 0x00);
+    drawPortraitTextInRectCentered("Volume", 34, item3Y, 340, 90, (GFXfont *)&FiraSans);
+    drawPortraitTextInRectCentered(">", 370, item3Y, 80, 90, (GFXfont *)&FiraSans);
+}
+
+static bool ensureSdReady()
+{
+    if (SD.cardType() != CARD_NONE) {
+        return true;
+    }
+    SD.end();
+    SPI.begin(SD_SCLK, SD_MISO, SD_MOSI);
+    return SD.begin(SD_CS, SPI) && SD.cardType() != CARD_NONE;
+}
+
+static bool clearSdDirectory(File dir)
+{
+    bool ok = true;
+    File entry = dir.openNextFile();
+    while (entry) {
+        char path[192];
+        snprintf(path, sizeof(path), "%s", entry.path());
+        bool isDir = entry.isDirectory();
+        if (isDir) {
+            ok = clearSdDirectory(entry) && ok;
+        }
+        entry.close();
+        if (isDir) {
+            ok = SD.rmdir(path) && ok;
+        } else {
+            ok = SD.remove(path) && ok;
+        }
+        entry = dir.openNextFile();
+    }
+    return ok;
+}
+
+static void drawSdMenuScreen()
+{
+    memset(framebuffer, 0xFF, EPD_WIDTH * EPD_HEIGHT / 2);
+    drawTopStatusBar();
+    drawPortraitTextCentered("SD Card", 100, (GFXfont *)&FiraSans);
+
+    bool ready = ensureSdReady();
+    char status[96];
+    if (ready) {
+        uint64_t mb = SD.cardSize() / (1024ULL * 1024ULL);
+        snprintf(status, sizeof(status), "Connected  %llu MB", (unsigned long long)mb);
+    } else {
+        snprintf(status, sizeof(status), "No SD card detected");
+    }
+    drawPortraitTextInRectCenteredScaled(status, 34, 145, 472, 42, (GFXfont *)&FiraSans, 0.62f);
+
+    portraitDrawRect(34, 240, 472, 90, 0x00);
+    portraitDrawRect(36, 242, 468, 86, 0x00);
+    drawPortraitTextInRectCentered("Folder", 34, 240, 472, 90, (GFXfont *)&FiraSans);
+
+    portraitDrawRect(34, 370, 472, 90, 0x00);
+    portraitDrawRect(36, 372, 468, 86, 0x00);
+    drawPortraitTextInRectCentered("Format SD", 34, 370, 472, 90, (GFXfont *)&FiraSans);
+
+    if (sd_status_message[0] != '\0') {
+        drawSdStatusArea();
+    }
+}
+
+static void drawSdStatusArea()
+{
+    portraitFillRect(34, PORTRAIT_HEIGHT - 115, 472, 70, 0xFF);
+    drawPortraitTextInRectCenteredScaled(sd_status_message, 34, PORTRAIT_HEIGHT - 115, 472, 70, (GFXfont *)&FiraSans, 0.72f);
+}
+
+static void drawSdFolderScreen()
+{
+    memset(framebuffer, 0xFF, EPD_WIDTH * EPD_HEIGHT / 2);
+    drawTopStatusBar();
+    drawPortraitTextCentered("SD Folder", 100, (GFXfont *)&FiraSans);
+
+    if (!ensureSdReady()) {
+        drawPortraitTextInRectCenteredScaled("No SD card detected", 34, 260, 472, 80, (GFXfont *)&FiraSans, 0.72f);
+        return;
+    }
+
+    File root = SD.open("/");
+    if (!root || !root.isDirectory()) {
+        drawPortraitTextInRectCenteredScaled("Cannot open root folder", 34, 260, 472, 80, (GFXfont *)&FiraSans, 0.72f);
+        return;
+    }
+
+    int y = 160;
+    int count = 0;
+    File entry = root.openNextFile();
+    while (entry && count < 15) {
+        char line[96];
+        snprintf(line, sizeof(line), "%s %s", entry.isDirectory() ? "[D]" : "[F]", entry.name());
+        drawPortraitTextInRectCenteredScaled(line, 34, y, 472, 38, (GFXfont *)&FiraSans, 0.52f);
+        y += 46;
+        ++count;
+        entry.close();
+        entry = root.openNextFile();
+    }
+    if (count == 0) {
+        drawPortraitTextInRectCenteredScaled("SD card is empty", 34, 260, 472, 80, (GFXfont *)&FiraSans, 0.72f);
+    }
+    root.close();
+}
+
+static void formatSdCard()
+{
+    snprintf(sd_status_message, sizeof(sd_status_message), "Format SD");
+    refreshSdStatusArea();
+
+    bool ok = false;
+    if (ensureSdReady()) {
+        File root = SD.open("/");
+        ok = root && root.isDirectory() && clearSdDirectory(root);
+        if (root) root.close();
+    }
+
+    (void)ok;
+}
+
 static void drawContentSettingsScreen()
 {
     memset(framebuffer, 0xFF, EPD_WIDTH * EPD_HEIGHT / 2);
@@ -1087,6 +1842,43 @@ static void drawContentSettingsScreen()
 
     portraitDrawRect(startX + keyW * 8, y3, keyW * 2, keyH, 0x00);
     drawPortraitTextInRect("CLR", startX + keyW * 8, y3, keyW * 2, keyH, (GFXfont *)&FiraSans);
+}
+
+static bool handleSettingsMenuTouch(int16_t tx, int16_t ty)
+{
+    int32_t px = 0;
+    int32_t py = 0;
+    if (!portraitPointFromTouch(tx, ty, &px, &py, true)) {
+        if (!portraitPointFromTouch(tx, ty, &px, &py, false)) {
+            return false;
+        }
+    }
+
+    // Menu Item 1: Content URL (Y=190)
+    if (pointInRect(px, py, 34, 190, 472, 90)) {
+        showingSettingsMenu = false;
+        showingContentSettings = true;
+        kb_mode = KB_LOWERCASE;
+        refreshDisplay(drawContentSettingsScreen);
+        return true;
+    }
+
+    // Menu Item 2: SD Card (Y=304)
+    if (pointInRect(px, py, 34, 304, 472, 90)) {
+        showingSettingsMenu = false;
+        showingSdMenu = true;
+        showingSdFolder = false;
+        refreshDisplay(drawSdMenuScreen);
+        return true;
+    }
+
+    // Menu Item 3: Volume (Y=418) - placeholder for now
+    if (pointInRect(px, py, 34, 418, 472, 90)) {
+        // Placeholder: stay on the menu for now
+        return true;
+    }
+
+    return false;
 }
 
 static bool handleContentSettingsTouch(int16_t tx, int16_t ty)
@@ -1446,14 +2238,33 @@ static void drawBookLibraryLoadingScreen()
     drawPortraitTextCentered("Loading Books...", 360, (GFXfont *)&FiraSans);
 }
 
-static void drawBookLibraryScreen()
+static void drawBookLibraryRowsArea()
 {
-    memset(framebuffer, 0xFF, EPD_WIDTH * EPD_HEIGHT / 2);
-    drawTopStatusBar();
+    // The page-navigation partial refresh owns only this lower content band.
+    // Keep the in-memory header/count/icons untouched so the copied region
+    // exactly matches the physical area updated on the e-paper.
+    portraitFillRect(0,
+                     BOOK_LIST_REFRESH_Y,
+                     PORTRAIT_WIDTH,
+                     PORTRAIT_HEIGHT - BOOK_LIST_REFRESH_Y - BOOK_LIST_REFRESH_BOTTOM_MARGIN,
+                     0xFF);
 
-    drawPortraitTextCentered("Book Library", 102, (GFXfont *)&FiraSans);
-    drawBitmapIcon1bpp(BOOK_NAV_ICON_X, BOOK_NAV_UP_Y, BOOK_NAV_ICON_W, BOOK_NAV_ICON_H, book_nav_up_icon_64x64, 0x00);
-    drawBitmapIcon1bpp(BOOK_NAV_ICON_X, BOOK_NAV_DOWN_Y, BOOK_NAV_ICON_W, BOOK_NAV_ICON_H, book_nav_down_icon_64x64, 0x00);
+    if (book_count > 0) {
+        // Re-draw the counter summary in the partial-refresh rows area to ensure it updates instantly!
+        char summary[32];
+        int displayedCount = (int)((book_current_page - 1) * MAX_BOOK_ITEMS) + book_count;
+        if (book_total > 0 && displayedCount > book_total) {
+            displayedCount = book_total;
+        }
+        snprintf(summary, sizeof(summary), "%d/%d", displayedCount, book_total);
+        drawPortraitTextInRectCenteredScaled(summary,
+                                             54,
+                                             132,
+                                             PORTRAIT_WIDTH - 108,
+                                             28,
+                                             (GFXfont *)&FiraSans,
+                                             0.46f);
+    }
 
     if (book_count <= 0) {
         drawPortraitTextInRectCenteredScaled(book_library_status,
@@ -1466,45 +2277,228 @@ static void drawBookLibraryScreen()
         return;
     }
 
-    char summary[48];
-    snprintf(summary, sizeof(summary), "%d of %d books", book_count, book_total);
-    drawPortraitTextInRectCenteredScaled(summary, 54, 130, PORTRAIT_WIDTH - 108, 40, (GFXfont *)&FiraSans, 0.58f);
-
-    const int32_t listX = 28;
-    const int32_t listY = 185;
-    const int32_t rowH = 68;
-    const int32_t listW = PORTRAIT_WIDTH - 56;
-
     for (int i = 0; i < book_count; ++i) {
-        const int32_t y = listY + i * rowH;
-        portraitDrawRect(listX, y, listW, rowH - 8, 0x00);
-
-        char titleLine[112];
-        snprintf(titleLine, sizeof(titleLine), "%d. %s", i + 1, book_items[i].title);
-        drawPortraitTextInRectCenteredScaled(titleLine,
-                                             listX + 10,
-                                             y + 4,
-                                             listW - 20,
-                                             30,
-                                             (GFXfont *)&FiraSans,
-                                             0.55f);
-
-        char metaLine[96];
-        if (book_items[i].category[0] != '\0' && book_items[i].author[0] != '\0') {
-            snprintf(metaLine, sizeof(metaLine), "%s  %s", book_items[i].category, book_items[i].author);
-        } else if (book_items[i].category[0] != '\0') {
-            snprintf(metaLine, sizeof(metaLine), "%s", book_items[i].category);
-        } else {
-            snprintf(metaLine, sizeof(metaLine), "ID %ld", (long)book_items[i].id);
+        const int32_t y = BOOK_LIST_Y + i * BOOK_LIST_ROW_H;
+        if (y + BOOK_LIST_ROW_BOX_H > PORTRAIT_HEIGHT - 14) {
+            break;
         }
-        drawPortraitTextInRectCenteredScaled(metaLine,
-                                             listX + 10,
-                                             y + 32,
-                                             listW - 20,
-                                             24,
-                                             (GFXfont *)&FiraSans,
-                                             0.42f);
+        portraitDrawRect(BOOK_LIST_X, y, BOOK_LIST_W, BOOK_LIST_ROW_BOX_H, 0x00);
+
+        // Display ONLY the Chinese book title (no book numbers and no writer/author)
+        // Indented cleanly on the left, vertically centered inside the row box.
+        drawUtf8ChineseTextLeftAligned(book_items[i].title, BOOK_LIST_X + 16, y, BOOK_LIST_ROW_BOX_H);
+
+        // Show category on the right side of the row (right-aligned, vertically centered).
+        if (book_items[i].category[0] != '\0') {
+            drawUtf8ChineseTextRightAligned(book_items[i].category, BOOK_LIST_X + BOOK_LIST_W - 16, y, BOOK_LIST_ROW_BOX_H);
+        }
     }
+}
+
+static void drawBookLibraryScreen()
+{
+    memset(framebuffer, 0xFF, EPD_WIDTH * EPD_HEIGHT / 2);
+    drawTopStatusBar();
+
+    // draw "书库" in Chinese instead of "Book Library"
+    drawUtf8ChineseTextInRectSingleWidth("书库", 0, 84, PORTRAIT_WIDTH, 40);
+
+    // Draw Up and Down navigation icons next to each other
+    drawBitmapIcon1bpp(BOOK_NAV_UP_X, BOOK_NAV_UP_Y, BOOK_NAV_ICON_SIZE, BOOK_NAV_ICON_SIZE, book_nav_up_icon_64x64, 0x00);
+    drawBitmapIcon1bpp(BOOK_NAV_DOWN_X, BOOK_NAV_DOWN_Y, BOOK_NAV_ICON_SIZE, BOOK_NAV_ICON_SIZE, book_nav_down_icon_64x64, 0x00);
+
+    drawBookLibraryRowsArea();
+}
+
+static int32_t utf8CodepointCount(const char *text)
+{
+    int32_t count = 0;
+    const char *p = text;
+    uint32_t cp = 0;
+    while (utf8NextCodepoint(&p, &cp)) {
+        ++count;
+    }
+    return count;
+}
+
+static int32_t countBookReaderPagesByPixelWrap(const char *text)
+{
+    if (!text || text[0] == '\0') {
+        return 1;
+    }
+
+    const int32_t linesPerPage = max((int32_t)1, (PORTRAIT_HEIGHT - BOOK_READER_CONTENT_Y - 30) / BOOK_READER_LINE_H);
+    int32_t pageCount = 1;
+    int32_t lineCount = 1;
+    int32_t lineWidth = 0;
+    bool lineHasContent = false;
+    const int32_t maxLineWidth = BOOK_READER_CONTENT_W - 4;
+
+    const char *p = text;
+    uint32_t cp = 0;
+    while (utf8NextCodepoint(&p, &cp)) {
+        if (cp == '\r') {
+            continue;
+        }
+        if (cp == '\n') {
+            lineWidth = 0;
+            lineHasContent = false;
+            ++lineCount;
+        } else {
+            int32_t advance = chineseTextCodepointAdvanceNarrow(cp);
+            if (lineHasContent && lineWidth + advance > maxLineWidth) {
+                lineWidth = 0;
+                lineHasContent = false;
+                ++lineCount;
+            }
+            lineWidth += advance;
+            lineHasContent = true;
+        }
+
+        if (lineCount > linesPerPage) {
+            ++pageCount;
+            lineCount = 1;
+            lineWidth = (cp == '\n') ? 0 : lineWidth;
+            lineHasContent = (cp != '\n') && lineHasContent;
+        }
+    }
+
+    return max((int32_t)1, pageCount);
+}
+
+static void appendUtf8CodepointToBuffer(char *line, size_t lineSize, size_t *lineLen, const char *start, const char *end)
+{
+    if (!line || !lineLen || !start || !end || end <= start) {
+        return;
+    }
+    size_t bytes = (size_t)(end - start);
+    if (*lineLen + bytes >= lineSize) {
+        return;
+    }
+    memcpy(line + *lineLen, start, bytes);
+    *lineLen += bytes;
+    line[*lineLen] = '\0';
+}
+
+static void drawBookReaderContentPage()
+{
+    portraitFillRect(0,
+                     BOOK_READER_CONTENT_Y,
+                     PORTRAIT_WIDTH,
+                     PORTRAIT_HEIGHT - BOOK_READER_CONTENT_Y - BOOK_LIST_REFRESH_BOTTOM_MARGIN,
+                     0xFF);
+
+    if (selected_book_content.length() == 0) {
+        drawPortraitTextInRectCenteredScaled(book_reader_status,
+                                             34,
+                                             250,
+                                             PORTRAIT_WIDTH - 68,
+                                             80,
+                                             (GFXfont *)&FiraSans,
+                                             0.72f);
+        return;
+    }
+
+    const int32_t linesPerPage = max((int32_t)1, (PORTRAIT_HEIGHT - BOOK_READER_CONTENT_Y - 30) / BOOK_READER_LINE_H);
+    const int32_t targetPage = max((int32_t)0, book_reader_page);
+    const int32_t maxLineWidth = BOOK_READER_CONTENT_W - 4;
+
+    const char *p = selected_book_content.c_str();
+    uint32_t cp = 0;
+    int32_t pageIndex = 0;
+    int32_t lineIndex = 0;
+    int32_t lineWidth = 0;
+    bool lineHasContent = false;
+    char line[160];
+    size_t lineLen = 0;
+    line[0] = '\0';
+
+    while (*p != '\0' && lineIndex < linesPerPage) {
+        const char *cpStart = p;
+        if (!utf8NextCodepoint(&p, &cp)) {
+            break;
+        }
+        const char *cpEnd = p;
+
+        if (cp == '\r') {
+            continue;
+        }
+
+        if (cp == '\n') {
+            if (pageIndex == targetPage && lineLen > 0) {
+                drawUtf8ChineseTextLeftAlignedClippedNarrow(line, BOOK_READER_CONTENT_X, BOOK_READER_CONTENT_Y + lineIndex * BOOK_READER_LINE_H, BOOK_READER_CONTENT_W, BOOK_READER_LINE_H);
+            }
+            if (pageIndex == targetPage) {
+                ++lineIndex;
+                if (lineIndex >= linesPerPage) {
+                    break;
+                }
+            } else if (++lineIndex >= linesPerPage) {
+                ++pageIndex;
+                lineIndex = 0;
+            }
+
+            lineLen = 0;
+            lineWidth = 0;
+            lineHasContent = false;
+            line[0] = '\0';
+            continue;
+        }
+
+        const int32_t advance = chineseTextCodepointAdvanceNarrow(cp);
+        if (lineHasContent && lineWidth + advance > maxLineWidth) {
+            if (pageIndex == targetPage) {
+                drawUtf8ChineseTextLeftAlignedClippedNarrow(line, BOOK_READER_CONTENT_X, BOOK_READER_CONTENT_Y + lineIndex * BOOK_READER_LINE_H, BOOK_READER_CONTENT_W, BOOK_READER_LINE_H);
+                ++lineIndex;
+                if (lineIndex >= linesPerPage) {
+                    break;
+                }
+            } else if (++lineIndex >= linesPerPage) {
+                ++pageIndex;
+                lineIndex = 0;
+            }
+
+            lineLen = 0;
+            lineWidth = 0;
+            lineHasContent = false;
+            line[0] = '\0';
+        }
+
+        if (pageIndex == targetPage) {
+            appendUtf8CodepointToBuffer(line, sizeof(line), &lineLen, cpStart, cpEnd);
+        }
+        lineWidth += advance;
+        lineHasContent = true;
+    }
+
+    if (lineLen > 0 && pageIndex == targetPage && lineIndex < linesPerPage) {
+        drawUtf8ChineseTextLeftAlignedClippedNarrow(line, BOOK_READER_CONTENT_X, BOOK_READER_CONTENT_Y + lineIndex * BOOK_READER_LINE_H, BOOK_READER_CONTENT_W, BOOK_READER_LINE_H);
+    }
+}
+
+static void drawBookReaderScreen()
+{
+    memset(framebuffer, 0xFF, EPD_WIDTH * EPD_HEIGHT / 2);
+    drawTopStatusBar();
+
+    const char *title = selected_book_title[0] != '\0' ? selected_book_title : book_reader_status;
+    drawUtf8ChineseTextLeftAlignedClipped(title, 24, 84, BOOK_NAV_UP_X - 48, 40);
+
+    // Reuse the existing book-library up/down icons for reader page navigation.
+    drawBitmapIcon1bpp(BOOK_NAV_UP_X, BOOK_NAV_UP_Y, BOOK_NAV_ICON_SIZE, BOOK_NAV_ICON_SIZE, book_nav_up_icon_64x64, 0x00);
+    drawBitmapIcon1bpp(BOOK_NAV_DOWN_X, BOOK_NAV_DOWN_Y, BOOK_NAV_ICON_SIZE, BOOK_NAV_ICON_SIZE, book_nav_down_icon_64x64, 0x00);
+
+    char summary[32];
+    snprintf(summary, sizeof(summary), "%ld/%ld", (long)(book_reader_page + 1), (long)book_reader_total_pages);
+    drawPortraitTextInRectCenteredScaled(summary,
+                                         54,
+                                         132,
+                                         PORTRAIT_WIDTH - 108,
+                                         28,
+                                         (GFXfont *)&FiraSans,
+                                         0.46f);
+
+    drawBookReaderContentPage();
 }
 
 static void drawAnalogClockScreen()
@@ -1521,36 +2515,75 @@ static void drawAnalogClockScreen()
         timeinfo.tm_sec = 0;
     }
 
+    // Section 1: 本地时钟, matching the web clock page structure.
+    drawUtf8ChineseTextInRectSingleWidth("本地时钟", 34, 66, PORTRAIT_WIDTH - 68, 38);
+
     const int32_t cx = PORTRAIT_WIDTH / 2;
-    const int32_t cy = 360;
-    const int32_t r = 180;
+    const int32_t cy = 260;
+    const int32_t r = 130;
     portraitDrawCircle(cx, cy, r, 0x00);
     portraitDrawCircle(cx, cy, r - 1, 0x00);
-    portraitDrawCircle(cx, cy, r - 2, 0x00);
 
     for (int i = 0; i < 60; ++i) {
         float a = (i * 6.0f - 90.0f) * DEG_TO_RAD;
         int32_t outerX = cx + (int32_t)(cosf(a) * (r - 10));
         int32_t outerY = cy + (int32_t)(sinf(a) * (r - 10));
-        int32_t innerR = (i % 5 == 0) ? r - 34 : r - 22;
+        int32_t innerR = (i % 5 == 0) ? r - 28 : r - 18;
         int32_t innerX = cx + (int32_t)(cosf(a) * innerR);
         int32_t innerY = cy + (int32_t)(sinf(a) * innerR);
-        drawThickPortraitLine(innerX, innerY, outerX, outerY, (i % 5 == 0) ? 4 : 2, 0x00);
+        drawThickPortraitLine(innerX, innerY, outerX, outerY, (i % 5 == 0) ? 3 : 1, 0x00);
+    }
+
+    for (int hour = 1; hour <= 12; ++hour) {
+        float a = (hour * 30.0f - 90.0f) * DEG_TO_RAD;
+        int32_t tx = cx + (int32_t)(cosf(a) * (r - 40));
+        int32_t ty = cy + (int32_t)(sinf(a) * (r - 40));
+        char hourLabel[3];
+        snprintf(hourLabel, sizeof(hourLabel), "%d", hour);
+        drawPortraitTextInRectCenteredScaled(hourLabel, tx - 12, ty - 12, 24, 24, (GFXfont *)&FiraSans, 0.30f);
     }
 
     float minuteAngle = ((timeinfo.tm_min + timeinfo.tm_sec / 60.0f) * 6.0f - 90.0f) * DEG_TO_RAD;
     float hourAngle = (((timeinfo.tm_hour % 12) + timeinfo.tm_min / 60.0f) * 30.0f - 90.0f) * DEG_TO_RAD;
-    int32_t hourX = cx + (int32_t)(cosf(hourAngle) * 82);
-    int32_t hourY = cy + (int32_t)(sinf(hourAngle) * 82);
-    int32_t minuteX = cx + (int32_t)(cosf(minuteAngle) * 132);
-    int32_t minuteY = cy + (int32_t)(sinf(minuteAngle) * 132);
-    drawThickPortraitLine(cx, cy, hourX, hourY, 8, 0x00);
-    drawThickPortraitLine(cx, cy, minuteX, minuteY, 5, 0x00);
-    portraitFillCircle(cx, cy, 10, 0x00);
+    int32_t hourX = cx + (int32_t)(cosf(hourAngle) * 60);
+    int32_t hourY = cy + (int32_t)(sinf(hourAngle) * 60);
+    int32_t minuteX = cx + (int32_t)(cosf(minuteAngle) * 95);
+    int32_t minuteY = cy + (int32_t)(sinf(minuteAngle) * 95);
+    drawThickPortraitLine(cx, cy, hourX, hourY, 6, 0x00);
+    drawThickPortraitLine(cx, cy, minuteX, minuteY, 4, 0x00);
+    portraitFillCircle(cx, cy, 8, 0x00);
 
-    char weatherLine[64];
-    snprintf(weatherLine, sizeof(weatherLine), "24C  Sunny");
-    drawPortraitTextCentered(weatherLine, cy + r + 80, (GFXfont *)&FiraSans);
+    char timeLine[16];
+    snprintf(timeLine, sizeof(timeLine), "%02d:%02d", timeinfo.tm_hour, timeinfo.tm_min);
+    drawPortraitTextInRectCenteredScaled(timeLine, 34, 405, PORTRAIT_WIDTH - 68, 48, (GFXfont *)&FiraSans, 0.80f);
+
+    char dateLine[48];
+    snprintf(dateLine, sizeof(dateLine), "%04d-%02d-%02d", timeinfo.tm_year + 1900, timeinfo.tm_mon + 1, timeinfo.tm_mday);
+    drawPortraitTextInRectCenteredScaled(dateLine, 34, 452, PORTRAIT_WIDTH - 68, 28, (GFXfont *)&FiraSans, 0.42f);
+
+    // Section 2: 当前位置.
+    drawUtf8ChineseTextInRectSingleWidth("当前位置", 34, 488, PORTRAIT_WIDTH - 68, 32);
+
+    const char *city = clock_weather.city[0] != '\0' ? clock_weather.city : "Shenzhen";
+    drawUtf8ChineseTextInRectSingleWidth(city, 34, 522, PORTRAIT_WIDTH - 68, 36);
+
+    // Section 3: 当地天气.
+    drawUtf8ChineseTextInRectSingleWidth("当地天气", 34, 570, PORTRAIT_WIDTH - 68, 32);
+    portraitDrawRect(34, 610, PORTRAIT_WIDTH - 68, 150, 0x00);
+    portraitDrawRect(38, 614, PORTRAIT_WIDTH - 76, 142, 0x00);
+
+    if (clock_weather.loaded) {
+        char tempLine[80];
+        snprintf(tempLine, sizeof(tempLine), "%sC  %s", clock_weather.temp[0] ? clock_weather.temp : "--", clock_weather.desc[0] ? clock_weather.desc : "Weather");
+        drawPortraitTextInRectCenteredScaled(tempLine, 48, 626, PORTRAIT_WIDTH - 96, 44, (GFXfont *)&FiraSans, 0.66f);
+
+        char detailLine[96];
+        snprintf(detailLine, sizeof(detailLine), "Humidity %s%%   Wind %s km/h", clock_weather.humidity[0] ? clock_weather.humidity : "--", clock_weather.wind[0] ? clock_weather.wind : "--");
+        drawPortraitTextInRectCenteredScaled(detailLine, 48, 678, PORTRAIT_WIDTH - 96, 28, (GFXfont *)&FiraSans, 0.36f);
+        drawUtf8ChineseTextInRectSingleWidth(city, 48, 712, PORTRAIT_WIDTH - 96, 28);
+    } else {
+        drawPortraitTextInRectCenteredScaled(clock_weather.status, 48, 660, PORTRAIT_WIDTH - 96, 44, (GFXfont *)&FiraSans, 0.50f);
+    }
 }
 
 static void drawCalculatorScreen()
@@ -1930,6 +2963,85 @@ static void refreshDisplay(void (*drawFn)())
     refreshDisplayExtended(drawFn, false);
 }
 
+static void refreshDisplayWhiteOnly(void (*drawFn)())
+{
+    epd_poweron();
+
+    epd_push_pixels(epd_full_screen(), 80, 1);
+    drawFn();
+    epd_draw_grayscale_image(epd_full_screen(), framebuffer);
+
+    epd_poweroff();
+}
+
+static void refreshSdStatusArea()
+{
+    drawSdStatusArea();
+
+    Rect_t statusArea = portraitRectToPhysicalRect(34, PORTRAIT_HEIGHT - 115, 472, 70);
+    uint8_t *statusBuffer = copyPhysicalAreaFromFramebuffer(statusArea);
+    if (!statusBuffer) {
+        return;
+    }
+
+    epd_poweron();
+    epd_draw_grayscale_image(statusArea, statusBuffer);
+    epd_poweroff();
+
+    free(statusBuffer);
+}
+
+static void refreshBookLibraryListArea()
+{
+    // For page up/down navigation, keep the header area unchanged on the EPD:
+    // home/status bar, "书库", count, and up/down icons are not refreshed.
+    // Only the rows below the icon/header band are wiped and replaced.
+    drawBookLibraryRowsArea();
+
+    const int32_t listRefreshH = PORTRAIT_HEIGHT - BOOK_LIST_REFRESH_Y - BOOK_LIST_REFRESH_BOTTOM_MARGIN;
+    Rect_t listArea = portraitRectToPhysicalRect(0, BOOK_LIST_REFRESH_Y, PORTRAIT_WIDTH, listRefreshH);
+    uint8_t *listBuffer = copyPhysicalAreaFromFramebuffer(listArea);
+    if (!listBuffer) {
+        return;
+    }
+
+    epd_poweron();
+    for (int32_t i = 0; i < 2; ++i) {
+        epd_push_pixels(listArea, 70, 0);
+        epd_push_pixels(listArea, 70, 1);
+    }
+    epd_push_pixels(listArea, 70, 1);
+    epd_draw_grayscale_image(listArea, listBuffer);
+    epd_poweroff();
+
+    free(listBuffer);
+}
+
+static void refreshBookReaderContentArea()
+{
+    updateBookReaderPagination();
+    drawBookReaderScreen();
+
+    const int32_t readerRefreshH = PORTRAIT_HEIGHT - BOOK_READER_CONTENT_Y - BOOK_LIST_REFRESH_BOTTOM_MARGIN;
+    Rect_t readerArea = portraitRectToPhysicalRect(0, BOOK_READER_CONTENT_Y, PORTRAIT_WIDTH, readerRefreshH);
+    uint8_t *readerBuffer = copyPhysicalAreaFromFramebuffer(readerArea);
+    if (!readerBuffer) {
+        return;
+    }
+
+    epd_poweron();
+    for (int32_t i = 0; i < 2; ++i) {
+        epd_push_pixels(readerArea, 70, 0);
+        epd_push_pixels(readerArea, 70, 1);
+    }
+    epd_push_pixels(readerArea, 70, 1);
+    epd_draw_grayscale_image(readerArea, readerBuffer);
+    epd_poweroff();
+
+    free(readerBuffer);
+}
+
+
 static void refreshWifiPasswordArea()
 {
     // Redraw only the password input framebuffer region so typing does not
@@ -1992,6 +3104,7 @@ static void refreshWifiKeyboardArea()
 {
     // Redraw the full settings framebuffer in memory so keyboard labels match
     // the new kb_mode, but only wipe/update the keyboard rectangle on the EPD.
+    
     drawSettingsScreen();
 
     // E-paper partial updates can leave visible remnants when changing dense
@@ -2157,16 +3270,120 @@ struct _point {
 
 static void processTouchRelease(int16_t x, int16_t y)
 {
-    if ((showingClock || showingCalculator || showingSettings || showingContentSettings || showingBookLibrary) && touchHitsHomeStatusIcon(x, y)) {
+    if ((showingClock || showingCalculator || showingSettings || showingSettingsMenu || showingContentSettings || showingBookLibrary || showingBookReader || showingSdMenu || showingSdFolder) && touchHitsHomeStatusIcon(x, y)) {
         showingClock = false;
         showingCalculator = false;
         showingSettings = false;
+        showingSettingsMenu = false;
         showingContentSettings = false;
         showingBookLibrary = false;
+        showingBookReader = false;
+        showingSdMenu = false;
+        showingSdFolder = false;
         show_password_prompt = false;
         refreshDisplay(drawPortraitHome);
         touch_loop_interval = millis() + 300;
         return;
+    }
+
+    if (showingSdMenu) {
+        if (touchHitsPortraitRect(x, y, 34, 240, 472, 90)) {
+            showingSdMenu = false;
+            showingSdFolder = true;
+            refreshDisplayWhiteOnly(drawSdFolderScreen);
+            touch_loop_interval = millis() + 300;
+            return;
+        }
+        if (touchHitsPortraitRect(x, y, 34, 370, 472, 90)) {
+            formatSdCard();
+            touch_loop_interval = millis() + 300;
+            return;
+        }
+    }
+
+    if (showingBookLibrary) {
+        // Check Up navigation button
+        if (touchHitsPortraitRect(x, y, BOOK_NAV_UP_X, BOOK_NAV_UP_Y, BOOK_NAV_ICON_SIZE, BOOK_NAV_ICON_SIZE)) {
+            if (book_current_page > 1) {
+                int32_t previousPage = book_current_page;
+                book_current_page--;
+                if (!fetchBookLibrary()) {
+                    book_current_page = previousPage;
+                } else {
+                    refreshBookLibraryListArea();
+                }
+            }
+            touch_loop_interval = millis() + 300;
+            return;
+        }
+        // Check Down navigation button
+        if (touchHitsPortraitRect(x, y, BOOK_NAV_DOWN_X, BOOK_NAV_DOWN_Y, BOOK_NAV_ICON_SIZE, BOOK_NAV_ICON_SIZE)) {
+            if (book_current_page * MAX_BOOK_ITEMS < book_total) {
+                int32_t previousPage = book_current_page;
+                book_current_page++;
+                if (!fetchBookLibrary()) {
+                    book_current_page = previousPage;
+                } else {
+                    refreshBookLibraryListArea();
+                }
+            }
+            touch_loop_interval = millis() + 300;
+            return;
+        }
+
+        for (int i = 0; i < book_count; ++i) {
+            const int32_t rowY = BOOK_LIST_Y + i * BOOK_LIST_ROW_H;
+            if (touchHitsPortraitRect(x, y, BOOK_LIST_X, rowY, BOOK_LIST_W, BOOK_LIST_ROW_BOX_H)) {
+                const int32_t tappedBookId = book_items[i].id;
+                const bool canUseCachedBook = (selected_book_id == tappedBookId && selected_book_content.length() > 0);
+                selected_book_id = tappedBookId;
+                snprintf(selected_book_title, sizeof(selected_book_title), "%s", book_items[i].title);
+                snprintf(selected_book_author, sizeof(selected_book_author), "%s", book_items[i].author);
+                snprintf(selected_book_category, sizeof(selected_book_category), "%s", book_items[i].category);
+                book_reader_page = 0;
+                if (canUseCachedBook) {
+                    updateBookReaderPagination();
+                    snprintf(book_reader_status, sizeof(book_reader_status), "Loaded book");
+                } else {
+                    selected_book_content = "";
+                    book_reader_total_pages = 1;
+                    snprintf(book_reader_status, sizeof(book_reader_status), "Loading book...");
+
+                    refreshDisplay(drawBookReaderScreen);
+                    if (!fetchSelectedBook(selected_book_id)) {
+                        selected_book_content = "";
+                    }
+                }
+                showingBookLibrary = false;
+                showingBookReader = true;
+                refreshDisplay(drawBookReaderScreen);
+                touch_loop_interval = millis() + 300;
+                return;
+            }
+        }
+    }
+
+    if (showingBookReader) {
+        if (touchHitsPortraitRect(x, y, BOOK_NAV_UP_X, BOOK_NAV_UP_Y, BOOK_NAV_ICON_SIZE, BOOK_NAV_ICON_SIZE)) {
+            if (book_reader_page > 0) {
+                book_reader_page--;
+                refreshBookReaderContentArea();
+            } else {
+                showingBookReader = false;
+                showingBookLibrary = true;
+                refreshDisplay(drawBookLibraryScreen);
+            }
+            touch_loop_interval = millis() + 300;
+            return;
+        }
+        if (touchHitsPortraitRect(x, y, BOOK_NAV_DOWN_X, BOOK_NAV_DOWN_Y, BOOK_NAV_ICON_SIZE, BOOK_NAV_ICON_SIZE)) {
+            if (book_reader_page + 1 < book_reader_total_pages) {
+                book_reader_page++;
+                refreshBookReaderContentArea();
+            }
+            touch_loop_interval = millis() + 300;
+            return;
+        }
     }
 
     if (showingCalculator && handleCalculatorTouch(x, y)) {
@@ -2179,52 +3396,59 @@ static void processTouchRelease(int16_t x, int16_t y)
         return;
     }
 
+    if (showingSettingsMenu && handleSettingsMenuTouch(x, y)) {
+        touch_loop_interval = millis() + 300;
+        return;
+    }
+
     if (showingContentSettings && handleContentSettingsTouch(x, y)) {
         touch_loop_interval = millis() + 300;
         return;
     }
 
-    if (!showingClock && !showingCalculator && !showingSettings && !showingContentSettings && !showingBookLibrary && touchHitsSettingsTile(x, y)) {
-        showingContentSettings = true;
-        kb_mode = KB_LOWERCASE;
-        refreshDisplay(drawContentSettingsScreen);
+    if (!showingClock && !showingCalculator && !showingSettings && !showingSettingsMenu && !showingContentSettings && !showingBookLibrary && !showingBookReader && !showingSdMenu && !showingSdFolder && touchHitsSettingsTile(x, y)) {
+        showingSettingsMenu = true;
+        refreshDisplay(drawSettingsMenuScreen);
         touch_loop_interval = millis() + 300;
         return;
     }
 
-    if (!showingClock && !showingCalculator && !showingSettings && !showingContentSettings && !showingBookLibrary && touchHitsBookTile(x, y)) {
+    if (!showingClock && !showingCalculator && !showingSettings && !showingSettingsMenu && !showingContentSettings && !showingBookLibrary && !showingBookReader && !showingSdMenu && !showingSdFolder && touchHitsBookTile(x, y)) {
         showingBookLibrary = true;
         book_count = 0;
         book_total = 0;
-        snprintf(book_library_status, sizeof(book_library_status), "Loading books...");
-        refreshDisplay(drawBookLibraryLoadingScreen);
+        book_current_page = 1;
         fetchBookLibrary();
         refreshDisplay(drawBookLibraryScreen);
         touch_loop_interval = millis() + 300;
         return;
     }
 
-    if (!showingClock && !showingCalculator && !showingSettings && !showingContentSettings && !showingBookLibrary && touchHitsCalculatorTile(x, y)) {
+    if (!showingClock && !showingCalculator && !showingSettings && !showingSettingsMenu && !showingContentSettings && !showingBookLibrary && !showingBookReader && !showingSdMenu && !showingSdFolder && touchHitsCalculatorTile(x, y)) {
         showingCalculator = true;
         refreshDisplay(drawCalculatorScreen);
         touch_loop_interval = millis() + 300;
         return;
     }
 
-    if (!showingClock && !showingCalculator && !showingSettings && !showingContentSettings && !showingBookLibrary && touchHitsClockTile(x, y)) {
+    if (!showingClock && !showingCalculator && !showingSettings && !showingSettingsMenu && !showingContentSettings && !showingBookLibrary && !showingBookReader && !showingSdMenu && !showingSdFolder && touchHitsClockTile(x, y)) {
         showingClock = true;
+        fetchClockWeatherInfo();
         refreshDisplay(drawAnalogClockScreen);
         clock_refresh_interval = millis() + 60000;
         touch_loop_interval = millis() + 300;
         return;
     }
 
-    if (!showingSettings && !showingContentSettings && touchHitsWifiStatusIcon(x, y)) {
+    if (!showingSettings && !showingSettingsMenu && !showingContentSettings && !showingSdMenu && !showingSdFolder && touchHitsWifiStatusIcon(x, y)) {
         showingClock = false;
         showingCalculator = false;
         showingSettings = true;
         showingContentSettings = false;
         showingBookLibrary = false;
+        showingBookReader = false;
+        showingSdMenu = false;
+        showingSdFolder = false;
         show_password_prompt = false;
         kb_mode = KB_LOWERCASE;
         wifi_ssid_input[0] = '\0';
@@ -2351,16 +3575,23 @@ static void loadContentUrl()
 {
     if (!appPrefs.begin("app", true)) {
         Serial.println("Failed to open app preferences for reading");
-        saved_content_url[0] = '\0';
-        content_url_input[0] = '\0';
+        // Use default content URL when preferences are unavailable
+        snprintf(saved_content_url, sizeof(saved_content_url), "http://43.133.150.106:3001");
+        snprintf(content_url_input, sizeof(content_url_input), "http://43.133.150.106:3001");
         return;
     }
 
     String url = appPrefs.getString("contentUrl", "");
     appPrefs.end();
 
-    snprintf(saved_content_url, sizeof(saved_content_url), "%s", url.c_str());
-    snprintf(content_url_input, sizeof(content_url_input), "%s", url.c_str());
+    if (url.length() == 0) {
+        // Use default content URL when none is saved
+        snprintf(saved_content_url, sizeof(saved_content_url), "http://43.133.150.106:3001");
+        snprintf(content_url_input, sizeof(content_url_input), "http://43.133.150.106:3001");
+    } else {
+        snprintf(saved_content_url, sizeof(saved_content_url), "%s", url.c_str());
+        snprintf(content_url_input, sizeof(content_url_input), "%s", url.c_str());
+    }
 }
 
 static void saveContentUrl()
@@ -2397,18 +3628,318 @@ static void buildBooksApiUrl(char *out, size_t outSize)
         --len;
     }
 
-    if (strstr(normalized, "/api/books") != NULL) {
-        char separator = strchr(normalized, '?') ? '&' : '?';
-        snprintf(out, outSize, "%s%cpage=1&perPage=%d", normalized, separator, MAX_BOOK_ITEMS);
-    } else {
-        snprintf(out, outSize, "%s/api/books?page=1&perPage=%d", normalized, MAX_BOOK_ITEMS);
+    char *query = strchr(normalized, '?');
+    if (query) {
+        *query = '\0';
+        len = strlen(normalized);
     }
+
+    char *booksEndpoint = strstr(normalized, "/api/books");
+    if (booksEndpoint != NULL) {
+        // If the saved content URL is already an /api/books endpoint, remove
+        // any extra path/query before appending the current page parameters.
+        // This matches reference/server.js: /api/books?page=<n>&perPage=<n>.
+        booksEndpoint[strlen("/api/books")] = '\0';
+        snprintf(out, outSize, "%s?page=%ld&perPage=%d", normalized, (long)book_current_page, MAX_BOOK_ITEMS);
+    } else {
+        // The reference web app is served from the same origin as the API. If
+        // the user saved a page URL like http(s)://host/index.html, use only
+        // the origin before appending /api/books.
+        char *scheme = strstr(normalized, "://");
+        if (scheme) {
+            char *path = strchr(scheme + 3, '/');
+            if (path) {
+                *path = '\0';
+            }
+        }
+        snprintf(out, outSize, "%s/api/books?page=%ld&perPage=%d", normalized, (long)book_current_page, MAX_BOOK_ITEMS);
+    }
+}
+
+static void buildBookDetailApiUrl(char *out, size_t outSize, int32_t bookId)
+{
+    if (!out || outSize == 0) {
+        return;
+    }
+    out[0] = '\0';
+
+    const char *base = saved_content_url[0] != '\0' ? saved_content_url : content_url_input;
+    if (!base || base[0] == '\0' || bookId <= 0) {
+        return;
+    }
+
+    char normalized[256];
+    snprintf(normalized, sizeof(normalized), "%s", base);
+    size_t len = strlen(normalized);
+    while (len > 0 && normalized[len - 1] == '/') {
+        normalized[len - 1] = '\0';
+        --len;
+    }
+
+    char *query = strchr(normalized, '?');
+    if (query) {
+        *query = '\0';
+    }
+
+    char *booksEndpoint = strstr(normalized, "/api/books");
+    if (booksEndpoint != NULL) {
+        booksEndpoint[strlen("/api/books")] = '\0';
+        snprintf(out, outSize, "%s/%ld", normalized, (long)bookId);
+    } else {
+        char *scheme = strstr(normalized, "://");
+        if (scheme) {
+            char *path = strchr(scheme + 3, '/');
+            if (path) {
+                *path = '\0';
+            }
+        }
+        snprintf(out, outSize, "%s/api/books/%ld", normalized, (long)bookId);
+    }
+}
+
+static void buildContentApiUrl(char *out, size_t outSize, const char *endpoint, const char *query)
+{
+    if (!out || outSize == 0) {
+        return;
+    }
+    out[0] = '\0';
+
+    const char *base = saved_content_url[0] != '\0' ? saved_content_url : content_url_input;
+    if (!base || base[0] == '\0' || !endpoint || endpoint[0] == '\0') {
+        return;
+    }
+
+    char origin[256];
+    snprintf(origin, sizeof(origin), "%s", base);
+
+    char *queryStart = strchr(origin, '?');
+    if (queryStart) {
+        *queryStart = '\0';
+    }
+    size_t len = strlen(origin);
+    while (len > 0 && origin[len - 1] == '/') {
+        origin[len - 1] = '\0';
+        --len;
+    }
+
+    char *scheme = strstr(origin, "://");
+    if (scheme) {
+        char *path = strchr(scheme + 3, '/');
+        if (path) {
+            *path = '\0';
+        }
+    }
+
+    snprintf(out, outSize, "%s%s%s", origin, endpoint, query ? query : "");
+}
+
+static bool httpGetString(const char *url, String &payload, char *status, size_t statusSize, uint32_t timeoutMs)
+{
+    if (!url || url[0] == '\0') {
+        if (status && statusSize > 0) snprintf(status, statusSize, "Set Content URL first");
+        return false;
+    }
+    if (WiFi.status() != WL_CONNECTED) {
+        if (status && statusSize > 0) snprintf(status, statusSize, "WiFi not connected");
+        return false;
+    }
+
+    Serial.printf("HTTP GET: %s\n", url);
+    HTTPClient http;
+    http.setTimeout(timeoutMs);
+    WiFiClient plainClient;
+    WiFiClientSecure secureClient;
+    bool began = false;
+    if (strncmp(url, "https://", 8) == 0) {
+        secureClient.setInsecure();
+        began = http.begin(secureClient, url);
+    } else {
+        began = http.begin(plainClient, url);
+    }
+    if (!began) {
+        if (status && statusSize > 0) snprintf(status, statusSize, "Bad URL");
+        return false;
+    }
+
+    http.setReuse(false);
+    http.addHeader("Connection", "close");
+    int httpCode = http.GET();
+    if (httpCode != HTTP_CODE_OK) {
+        if (status && statusSize > 0) snprintf(status, statusSize, "HTTP error: %d", httpCode);
+        http.end();
+        return false;
+    }
+
+    payload = http.getString();
+    http.end();
+    return true;
+}
+
+static void urlEncodeSpaces(char *text)
+{
+    if (!text || !strchr(text, ' ')) {
+        return;
+    }
+    char encoded[96];
+    size_t outLen = 0;
+    for (size_t i = 0; text[i] != '\0' && outLen < sizeof(encoded) - 1; ++i) {
+        if (text[i] == ' ') {
+            if (outLen + 3 >= sizeof(encoded)) break;
+            encoded[outLen++] = '%';
+            encoded[outLen++] = '2';
+            encoded[outLen++] = '0';
+        } else {
+            encoded[outLen++] = text[i];
+        }
+    }
+    encoded[outLen] = '\0';
+    snprintf(text, 64, "%s", encoded);
+}
+
+static bool fetchClockWeatherInfo()
+{
+    clock_weather.loaded = false;
+    snprintf(clock_weather.status, sizeof(clock_weather.status), "Syncing clock/weather...");
+    snprintf(clock_weather.city, sizeof(clock_weather.city), "Shenzhen");
+
+    char url[320];
+    String payload;
+
+    buildContentApiUrl(url, sizeof(url), "/api/geoip", NULL);
+    if (!httpGetString(url, payload, clock_weather.status, sizeof(clock_weather.status), 10000)) {
+        return false;
+    }
+
+    JsonDocument geoDoc;
+    DeserializationError geoErr = deserializeJson(geoDoc, payload);
+    if (geoErr) {
+        snprintf(clock_weather.status, sizeof(clock_weather.status), "Geo JSON failed");
+        Serial.printf("Geo JSON parse failed: %s\n", geoErr.c_str());
+        return false;
+    }
+
+    JsonObject geo = geoDoc.as<JsonObject>();
+    copyJsonString(clock_weather.city, sizeof(clock_weather.city), geo, "city", "");
+    copyJsonString(clock_weather.timezone, sizeof(clock_weather.timezone), geo, "timezone", "Asia/Shanghai");
+    if (clock_weather.city[0] == '\0') {
+        snprintf(clock_weather.city, sizeof(clock_weather.city), "Shenzhen");
+    }
+
+    char weatherCity[64];
+    snprintf(weatherCity, sizeof(weatherCity), "%s", clock_weather.city[0] ? clock_weather.city : "Shenzhen");
+    urlEncodeSpaces(weatherCity);
+
+    char query[96];
+    snprintf(query, sizeof(query), "?city=%s", weatherCity);
+    buildContentApiUrl(url, sizeof(url), "/api/weather", query);
+
+    bool weatherOk = false;
+    for (int attempt = 1; attempt <= 3 && !weatherOk; ++attempt) {
+        payload = "";
+        snprintf(clock_weather.status, sizeof(clock_weather.status), "Weather try %d/3...", attempt);
+        weatherOk = httpGetString(url, payload, clock_weather.status, sizeof(clock_weather.status), 45000);
+        if (!weatherOk && attempt < 3) {
+            delay(2500);
+        }
+    }
+    if (!weatherOk) {
+        return false;
+    }
+
+    JsonDocument weatherDoc;
+    DeserializationError weatherErr = deserializeJson(weatherDoc, payload);
+    if (weatherErr) {
+        snprintf(clock_weather.status, sizeof(clock_weather.status), "Weather JSON failed");
+        Serial.printf("Weather JSON parse failed: %s\n", weatherErr.c_str());
+        return false;
+    }
+
+    JsonObject weather = weatherDoc.as<JsonObject>();
+    copyJsonString(clock_weather.temp, sizeof(clock_weather.temp), weather, "temp", "--");
+    copyJsonString(clock_weather.desc, sizeof(clock_weather.desc), weather, "desc", "Weather");
+    copyJsonString(clock_weather.humidity, sizeof(clock_weather.humidity), weather, "humidity", "--");
+    copyJsonString(clock_weather.wind, sizeof(clock_weather.wind), weather, "wind", "--");
+
+    char returnedCity[64];
+    copyJsonString(returnedCity, sizeof(returnedCity), weather, "city", "");
+    if (returnedCity[0] != '\0') {
+        snprintf(clock_weather.city, sizeof(clock_weather.city), "%s", returnedCity);
+    } else if (clock_weather.city[0] == '\0') {
+        snprintf(clock_weather.city, sizeof(clock_weather.city), "Shenzhen");
+    }
+
+    snprintf(clock_weather.status, sizeof(clock_weather.status), "Weather synced");
+    clock_weather.loaded = true;
+    return true;
+}
+
+static void updateBookReaderPagination()
+{
+    book_reader_total_pages = countBookReaderPagesByPixelWrap(selected_book_content.c_str());
+    if (book_reader_page < 0) {
+        book_reader_page = 0;
+    }
+    if (book_reader_page >= book_reader_total_pages) {
+        book_reader_page = book_reader_total_pages - 1;
+    }
+}
+
+static bool fetchSelectedBook(int32_t bookId)
+{
+    if (WiFi.status() != WL_CONNECTED) {
+        snprintf(book_reader_status, sizeof(book_reader_status), "WiFi not connected");
+        return false;
+    }
+
+    char url[320];
+    buildBookDetailApiUrl(url, sizeof(url), bookId);
+    if (url[0] == '\0') {
+        snprintf(book_reader_status, sizeof(book_reader_status), "Set Content URL first");
+        return false;
+    }
+
+    String payload;
+    bool loaded = false;
+    for (int attempt = 1; attempt <= 3 && !loaded; ++attempt) {
+        snprintf(book_reader_status, sizeof(book_reader_status), "Book try %d/3...", attempt);
+        Serial.printf("Fetching selected book (try %d/3): %s\n", attempt, url);
+        loaded = httpGetString(url, payload, book_reader_status, sizeof(book_reader_status), 20000);
+        if (!loaded && attempt < 3) {
+            WiFiClient().stop();
+            delay(1200);
+        }
+    }
+    if (!loaded) {
+        return false;
+    }
+
+    JsonDocument doc;
+    DeserializationError err = deserializeJson(doc, payload);
+    if (err) {
+        snprintf(book_reader_status, sizeof(book_reader_status), "Book JSON failed");
+        Serial.printf("Book detail JSON parse failed: %s\n", err.c_str());
+        return false;
+    }
+
+    JsonObject item = doc.as<JsonObject>();
+    selected_book_id = item["id"] | bookId;
+    copyBookTitle(selected_book_title, sizeof(selected_book_title), item);
+    copyJsonString(selected_book_author, sizeof(selected_book_author), item, "author", "");
+    copyJsonString(selected_book_category, sizeof(selected_book_category), item, "category", "");
+    const char *content = item["content"] | "";
+    selected_book_content = content;
+
+    book_reader_page = 0;
+    updateBookReaderPagination();
+    snprintf(book_reader_status, sizeof(book_reader_status), "Loaded book");
+    return true;
 }
 
 static bool fetchBookLibrary()
 {
-    book_count = 0;
-    book_total = 0;
+    BookListItem fetched_items[MAX_BOOK_ITEMS];
+    int fetched_count = 0;
+    int fetched_total = book_total;
 
     if (WiFi.status() != WL_CONNECTED) {
         snprintf(book_library_status, sizeof(book_library_status), "WiFi not connected");
@@ -2422,24 +3953,20 @@ static bool fetchBookLibrary()
         return false;
     }
 
-    Serial.printf("Fetching book library: %s\n", url);
-
-    HTTPClient http;
-    http.setTimeout(10000);
-    if (!http.begin(url)) {
-        snprintf(book_library_status, sizeof(book_library_status), "Bad content URL");
+    String payload;
+    bool loaded = false;
+    for (int attempt = 1; attempt <= 3 && !loaded; ++attempt) {
+        snprintf(book_library_status, sizeof(book_library_status), "Books try %d/3...", attempt);
+        Serial.printf("Fetching book library (try %d/3): %s\n", attempt, url);
+        loaded = httpGetString(url, payload, book_library_status, sizeof(book_library_status), 20000);
+        if (!loaded && attempt < 3) {
+            WiFiClient().stop();
+            delay(1200);
+        }
+    }
+    if (!loaded) {
         return false;
     }
-
-    int httpCode = http.GET();
-    if (httpCode != HTTP_CODE_OK) {
-        snprintf(book_library_status, sizeof(book_library_status), "HTTP error: %d", httpCode);
-        http.end();
-        return false;
-    }
-
-    String payload = http.getString();
-    http.end();
 
     JsonDocument doc;
     DeserializationError err = deserializeJson(doc, payload);
@@ -2450,29 +3977,32 @@ static bool fetchBookLibrary()
     }
 
     JsonArray items = doc["items"].as<JsonArray>();
-    book_total = doc["total"] | 0;
+    fetched_total = doc["total"] | 0;
     if (items.isNull()) {
         snprintf(book_library_status, sizeof(book_library_status), "No items in JSON");
         return false;
     }
 
     for (JsonObject item : items) {
-        if (book_count >= MAX_BOOK_ITEMS) {
+        if (fetched_count >= MAX_BOOK_ITEMS) {
             break;
         }
-        BookListItem &book = book_items[book_count];
+        BookListItem &book = fetched_items[fetched_count];
         book.id = item["id"] | 0;
-        snprintf(book.title, sizeof(book.title), "%s", item["title"] | "Untitled");
-        snprintf(book.author, sizeof(book.author), "%s", item["author"] | "");
-        snprintf(book.category, sizeof(book.category), "%s", item["category"] | "");
-        ++book_count;
+        copyBookTitle(book.title, sizeof(book.title), item);
+        copyJsonString(book.author, sizeof(book.author), item, "author", "");
+        copyJsonString(book.category, sizeof(book.category), item, "category", "");
+        ++fetched_count;
     }
 
-    if (book_count <= 0) {
+    if (fetched_count <= 0) {
         snprintf(book_library_status, sizeof(book_library_status), "No books found");
         return false;
     }
 
+    memcpy(book_items, fetched_items, sizeof(BookListItem) * fetched_count);
+    book_count = fetched_count;
+    book_total = fetched_total;
     snprintf(book_library_status, sizeof(book_library_status), "Loaded %d books", book_count);
     return true;
 }
@@ -2666,6 +4196,18 @@ void loop()
             refreshDisplayExtended(drawCalculatorScreen, true);
         } else if (showingSettings) {
             refreshDisplayExtended(drawSettingsScreen, true);
+        } else if (showingSettingsMenu) {
+            refreshDisplayExtended(drawSettingsMenuScreen, true);
+        } else if (showingContentSettings) {
+            refreshDisplayExtended(drawContentSettingsScreen, true);
+        } else if (showingBookLibrary) {
+            refreshDisplayExtended(drawBookLibraryScreen, true);
+        } else if (showingBookReader) {
+            refreshDisplayExtended(drawBookReaderScreen, true);
+        } else if (showingSdMenu) {
+            refreshDisplayExtended(drawSdMenuScreen, true);
+        } else if (showingSdFolder) {
+            refreshDisplayExtended(drawSdFolderScreen, true);
         } else {
             refreshDisplayExtended(drawPortraitHome, true);
         }

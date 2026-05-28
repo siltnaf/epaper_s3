@@ -1,0 +1,550 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <title>时钟 - Clock</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif;
+      background: linear-gradient(135deg, #1a1a2e 0%, #16213e 50%, #0f3460 100%);
+      color: #fff;
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      padding: 20px;
+    }
+    .clock-page {
+      max-width: 500px;
+      width: 100%;
+    }
+    .clock-section {
+      background: rgba(255,255,255,0.08);
+      border-radius: 20px;
+      padding: 24px;
+      margin-bottom: 20px;
+      backdrop-filter: blur(10px);
+      border: 1px solid rgba(255,255,255,0.1);
+    }
+    .section-title {
+      font-size: 18px;
+      font-weight: 600;
+      margin-bottom: 16px;
+      color: #e0e0e0;
+    }
+    
+    /* Clock Display */
+    .clock-card {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+    }
+    .clock-canvas-wrap {
+      display: flex;
+      justify-content: center;
+      margin-bottom: 16px;
+    }
+    .clock-canvas-wrap canvas {
+      border-radius: 50%;
+      box-shadow: 0 8px 32px rgba(0,0,0,0.3);
+    }
+    .clock-digital {
+      text-align: center;
+    }
+    .clock-time {
+      font-size: 48px;
+      font-weight: 700;
+      letter-spacing: 2px;
+      text-shadow: 0 2px 10px rgba(0,0,0,0.3);
+      font-variant-numeric: tabular-nums;
+    }
+    .clock-date {
+      font-size: 16px;
+      color: #b0b0b0;
+      margin-top: 8px;
+    }
+    
+    /* Location Display */
+    .location-display {
+      text-align: center;
+    }
+    .location-message {
+      font-size: 28px;
+      font-weight: 600;
+      color: #4fc3f7;
+    }
+    .location-loading {
+      font-size: 16px;
+      color: #888;
+      animation: pulse 1.5s infinite;
+    }
+    .location-timezone {
+      font-size: 14px;
+      color: #888;
+      margin-top: 8px;
+    }
+    
+    /* Weather Display */
+    .weather-display {
+      text-align: center;
+    }
+    .weather-main {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 16px;
+      margin-bottom: 12px;
+    }
+    .weather-temp {
+      font-size: 42px;
+      font-weight: 700;
+    }
+    .weather-desc {
+      font-size: 18px;
+      color: #ccc;
+    }
+    .weather-icon-big {
+      font-size: 48px;
+    }
+    .weather-details {
+      display: flex;
+      justify-content: center;
+      gap: 24px;
+      font-size: 14px;
+      color: #aaa;
+      margin-bottom: 8px;
+    }
+    .weather-city {
+      font-size: 14px;
+      color: #888;
+      margin-top: 4px;
+    }
+    .weather-empty {
+      font-size: 16px;
+      color: #888;
+    }
+    
+    /* Loading state */
+    .loading {
+      text-align: center;
+      color: #888;
+      font-size: 16px;
+      animation: pulse 1.5s infinite;
+    }
+    
+    /* API Status */
+    .api-status {
+      background: rgba(255,255,255,0.05);
+      border-radius: 12px;
+      padding: 16px;
+      margin-top: 10px;
+      font-size: 12px;
+    }
+    .api-status h4 {
+      font-size: 14px;
+      margin-bottom: 8px;
+      color: #888;
+    }
+    .api-item {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin: 6px 0;
+      color: #aaa;
+    }
+    .api-dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: #666;
+    }
+    .api-dot.success { background: #4caf50; }
+    .api-dot.error { background: #f44336; }
+    .api-dot.loading { background: #ff9800; animation: pulse 1s infinite; }
+    
+    @keyframes pulse {
+      0%, 100% { opacity: 1; }
+      50% { opacity: 0.5; }
+    }
+    
+    /* Refresh button */
+    .refresh-btn {
+      display: block;
+      margin: 20px auto;
+      padding: 12px 32px;
+      background: linear-gradient(135deg, #4fc3f7, #2196f3);
+      border: none;
+      border-radius: 25px;
+      color: #fff;
+      font-size: 16px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: transform 0.2s, box-shadow 0.2s;
+    }
+    .refresh-btn:hover {
+      transform: translateY(-2px);
+      box-shadow: 0 4px 20px rgba(33,150,243,0.4);
+    }
+    .refresh-btn:active {
+      transform: translateY(0);
+    }
+  </style>
+</head>
+<body>
+  <div class="clock-page">
+    <!-- Section 1: Local Clock -->
+    <div class="clock-section">
+      <div class="section-title">🕐 本地时钟</div>
+      <div class="clock-card">
+        <div id="clock-canvas-container" class="clock-canvas-wrap"></div>
+        <div class="clock-digital">
+          <div class="clock-time" id="clock-time">--:--:--</div>
+          <div class="clock-date" id="clock-date">加载中...</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Section 2: Current Location -->
+    <div class="clock-section">
+      <div class="section-title">📍 当前位置</div>
+      <div class="location-display">
+        <div class="location-message" id="location-message">获取位置中...</div>
+        <div class="location-timezone" id="location-timezone"></div>
+      </div>
+    </div>
+
+    <!-- Section 3: Weather -->
+    <div class="clock-section">
+      <div class="section-title">🌤 当地天气</div>
+      <div class="weather-display" id="weather-display">
+        <div class="loading">获取天气中...</div>
+      </div>
+    </div>
+
+    <!-- API Status -->
+    <div class="api-status">
+      <h4>API 状态</h4>
+      <div class="api-item">
+        <span class="api-dot" id="api-clock-dot"></span>
+        <span>/api/clock</span>
+        <span id="api-clock-status">等待中...</span>
+      </div>
+      <div class="api-item">
+        <span class="api-dot" id="api-location-dot"></span>
+        <span>/api/location</span>
+        <span id="api-location-status">等待中...</span>
+      </div>
+      <div class="api-item">
+        <span class="api-dot" id="api-weather-dot"></span>
+        <span>/api/weather</span>
+        <span id="api-weather-status">等待中...</span>
+      </div>
+    </div>
+
+    <button class="refresh-btn" onclick="fetchAllData()">🔄 刷新数据</button>
+  </div>
+
+  <script>
+    // Configuration
+    const API_BASE = window.location.origin;
+    
+    // State
+    let clockTimezone = Intl.DateTimeFormat().resolvedOptions().timeZone || 'Asia/Shanghai';
+    let clockAnimFrame = null;
+    
+    // City name translation
+    const cityZhMap = {
+      'Shenzhen': '深圳', 'Shanghai': '上海', 'Beijing': '北京',
+      'Guangzhou': '广州', 'Hangzhou': '杭州', 'Chengdu': '成都',
+      'Wuhan': '武汉', 'Nanjing': '南京', 'Tianjin': '天津',
+      'Chongqing': '重庆', 'Suzhou': '苏州', "Xi'an": '西安',
+      'Changsha': '长沙', 'Zhengzhou': '郑州', 'Dongguan': '东莞',
+      'Qingdao': '青岛', 'Shenyang': '沈阳', 'Ningbo': '宁波',
+      'Kunming': '昆明', 'Dalian': '大连', 'Xiamen': '厦门',
+      'Fuzhou': '福州', 'Hefei': '合肥', 'Wuxi': '无锡',
+      'Foshan': '佛山', 'Changzhou': '常州', 'Jinan': '济南',
+      'Harbin': '哈尔滨', 'Changchun': '长春', 'Lanzhou': '兰州',
+      'Guiyang': '贵阳', 'Nanning': '南宁', 'Taiyuan': '太原',
+      'Shijiazhuang': '石家庄', 'Haikou': '海口', 'Sanya': '三亚',
+      'Macau': '澳门', 'Hong Kong': '香港', 'Taipei': '台北'
+    };
+    
+    function translateCity(en) {
+      return cityZhMap[en] || en;
+    }
+    
+    // ============ API 1: Clock ============
+    async function fetchClockData() {
+      const dot = document.getElementById('api-clock-dot');
+      const status = document.getElementById('api-clock-status');
+      dot.className = 'api-dot loading';
+      status.textContent = '请求中...';
+      
+      try {
+        const res = await fetch(API_BASE + '/api/clock');
+        if (!res.ok) throw new Error('HTTP ' + res.status);
+        const data = await res.json();
+        
+        if (data.timezone) {
+          clockTimezone = data.timezone;
+        }
+        
+        dot.className = 'api-dot success';
+        status.textContent = '✓ ' + data.timezone;
+        console.log('Clock API:', data);
+      } catch (e) {
+        dot.className = 'api-dot error';
+        status.textContent = '✗ ' + e.message;
+        console.warn('Clock API failed:', e);
+      }
+    }
+    
+    // ============ API 2: Location ============
+    async function fetchLocationData() {
+      const dot = document.getElementById('api-location-dot');
+      const status = document.getElementById('api-location-status');
+      dot.className = 'api-dot loading';
+      status.textContent = '请求中...';
+      
+      try {
+        const res = await fetch(API_BASE + '/api/location');
+        if (!res.ok) throw new Error('HTTP ' + res.status);
+        const data = await res.json();
+        
+        const messageEl = document.getElementById('location-message');
+        const tzEl = document.getElementById('location-timezone');
+        
+        if (data.message) {
+          messageEl.textContent = data.message;
+        } else if (data.city) {
+          messageEl.textContent = translateCity(data.city);
+        } else {
+          // Fallback: derive from timezone
+          const parts = clockTimezone.split('/');
+          const city = parts[parts.length - 1].replace(/_/g, ' ');
+          messageEl.textContent = translateCity(city) || '当前位置';
+        }
+        
+        if (data.timezone) {
+          clockTimezone = data.timezone;
+          tzEl.textContent = '🕐 ' + data.timezone;
+        }
+        
+        dot.className = 'api-dot success';
+        status.textContent = '✓ ' + (data.message || data.city);
+        console.log('Location API:', data);
+      } catch (e) {
+        dot.className = 'api-dot error';
+        status.textContent = '✗ ' + e.message;
+        console.warn('Location API failed:', e);
+        
+        // Fallback
+        const parts = clockTimezone.split('/');
+        const city = parts[parts.length - 1].replace(/_/g, ' ');
+        document.getElementById('location-message').textContent = translateCity(city) || '当前位置';
+      }
+    }
+    
+    // ============ API 3: Weather ============
+    async function fetchWeatherData() {
+      const dot = document.getElementById('api-weather-dot');
+      const status = document.getElementById('api-weather-status');
+      const display = document.getElementById('weather-display');
+      
+      dot.className = 'api-dot loading';
+      status.textContent = '请求中...';
+      display.innerHTML = '<div class="loading">获取天气中...</div>';
+      
+      try {
+        const res = await fetch(API_BASE + '/api/weather');
+        if (!res.ok) throw new Error('HTTP ' + res.status);
+        const data = await res.json();
+        
+        display.innerHTML = `
+          <div class="weather-main">
+            <span class="weather-icon-big">${data.icon}</span>
+            <span class="weather-temp">${data.temp}°C</span>
+          </div>
+          <div class="weather-desc">${data.desc}</div>
+          <div class="weather-details">
+            <span>💧 湿度 ${data.humidity}%</span>
+            <span>🌬 风速 ${data.wind} km/h</span>
+          </div>
+          <div class="weather-city">📍 ${data.city}</div>
+        `;
+        
+        dot.className = 'api-dot success';
+        status.textContent = '✓ ' + data.temp + '°C ' + data.desc;
+        console.log('Weather API:', data);
+      } catch (e) {
+        dot.className = 'api-dot error';
+        status.textContent = '✗ ' + e.message;
+        display.innerHTML = '<div class="weather-empty">暂时无法获取天气: ' + e.message + '</div>';
+        console.warn('Weather API failed:', e);
+      }
+    }
+    
+    // ============ Clock Display ============
+    function updateClockDisplay() {
+      const now = new Date();
+      const tz = clockTimezone || Intl.DateTimeFormat().resolvedOptions().timeZone;
+      
+      const parts = new Intl.DateTimeFormat('zh-CN', {
+        timeZone: tz,
+        hour: '2-digit',
+        minute: '2-digit',
+        second: '2-digit',
+        hour12: false
+      }).formatToParts(now);
+      
+      const h = parts.find(p => p.type === 'hour').value;
+      const m = parts.find(p => p.type === 'minute').value;
+      const s = parts.find(p => p.type === 'second').value;
+      
+      document.getElementById('clock-time').textContent = h + ':' + m + ':' + s;
+      
+      document.getElementById('clock-date').textContent = new Intl.DateTimeFormat('zh-CN', {
+        timeZone: tz,
+        year: 'numeric',
+        month: 'long',
+        day: 'numeric',
+        weekday: 'long'
+      }).format(now);
+    }
+    
+    function drawAnalogClock() {
+      const container = document.getElementById('clock-canvas-container');
+      if (!container) return;
+      
+      let canvas = container.querySelector('canvas');
+      if (!canvas) {
+        canvas = document.createElement('canvas');
+        canvas.width = 260;
+        canvas.height = 260;
+        container.appendChild(canvas);
+      }
+      
+      const ctx = canvas.getContext('2d');
+      const cx = canvas.width / 2;
+      const cy = canvas.height / 2;
+      const radius = 115;
+      
+      const tz = clockTimezone || Intl.DateTimeFormat().resolvedOptions().timeZone;
+      const now = new Date();
+      const parts = new Intl.DateTimeFormat('zh-CN', {
+        timeZone: tz,
+        hour: 'numeric',
+        minute: '2-digit',
+        second: '2-digit',
+        hour12: false
+      }).formatToParts(now);
+      
+      const hour = parseInt(parts.find(p => p.type === 'hour').value);
+      const minute = parseInt(parts.find(p => p.type === 'minute').value);
+      const second = parseInt(parts.find(p => p.type === 'second').value);
+      
+      // Clear
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      
+      // Clock face
+      ctx.beginPath();
+      ctx.arc(cx, cy, radius, 0, Math.PI * 2);
+      const gradient = ctx.createRadialGradient(cx, cy, 0, cx, cy, radius);
+      gradient.addColorStop(0, '#2a2a4a');
+      gradient.addColorStop(1, '#1a1a2e');
+      ctx.fillStyle = gradient;
+      ctx.fill();
+      ctx.strokeStyle = '#4fc3f7';
+      ctx.lineWidth = 3;
+      ctx.stroke();
+      
+      // Hour markers
+      for (let i = 0; i < 12; i++) {
+        const angle = (i * 30 - 90) * Math.PI / 180;
+        const innerR = i % 3 === 0 ? radius - 18 : radius - 10;
+        const outerR = radius - 4;
+        ctx.beginPath();
+        ctx.moveTo(cx + innerR * Math.cos(angle), cy + innerR * Math.sin(angle));
+        ctx.lineTo(cx + outerR * Math.cos(angle), cy + outerR * Math.sin(angle));
+        ctx.strokeStyle = i % 3 === 0 ? '#4fc3f7' : '#666';
+        ctx.lineWidth = i % 3 === 0 ? 3 : 1.5;
+        ctx.stroke();
+      }
+      
+      // Numbers
+      ctx.fillStyle = '#e0e0e0';
+      ctx.font = 'bold 14px sans-serif';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      for (let i = 1; i <= 12; i++) {
+        const angle = (i * 30 - 90) * Math.PI / 180;
+        const numR = radius - 28;
+        ctx.fillText(i.toString(), cx + numR * Math.cos(angle), cy + numR * Math.sin(angle));
+      }
+      
+      // Hour hand
+      const hourAngle = ((hour % 12) * 30 + minute * 0.5 - 90) * Math.PI / 180;
+      ctx.beginPath();
+      ctx.moveTo(cx, cy);
+      ctx.lineTo(cx + 50 * Math.cos(hourAngle), cy + 50 * Math.sin(hourAngle));
+      ctx.strokeStyle = '#fff';
+      ctx.lineWidth = 5;
+      ctx.lineCap = 'round';
+      ctx.stroke();
+      
+      // Minute hand
+      const minAngle = (minute * 6 + second * 0.1 - 90) * Math.PI / 180;
+      ctx.beginPath();
+      ctx.moveTo(cx, cy);
+      ctx.lineTo(cx + 70 * Math.cos(minAngle), cy + 70 * Math.sin(minAngle));
+      ctx.strokeStyle = '#fff';
+      ctx.lineWidth = 3.5;
+      ctx.lineCap = 'round';
+      ctx.stroke();
+      
+      // Second hand
+      const secAngle = (second * 6 - 90) * Math.PI / 180;
+      ctx.beginPath();
+      ctx.moveTo(cx - 12 * Math.cos(secAngle), cy - 12 * Math.sin(secAngle));
+      ctx.lineTo(cx + 80 * Math.cos(secAngle), cy + 80 * Math.sin(secAngle));
+      ctx.strokeStyle = '#f44336';
+      ctx.lineWidth = 2;
+      ctx.lineCap = 'round';
+      ctx.stroke();
+      
+      // Center dot
+      ctx.beginPath();
+      ctx.arc(cx, cy, 5, 0, Math.PI * 2);
+      ctx.fillStyle = '#4fc3f7';
+      ctx.fill();
+    }
+    
+    function startClockLoop() {
+      if (clockAnimFrame) cancelAnimationFrame(clockAnimFrame);
+      
+      function update() {
+        updateClockDisplay();
+        drawAnalogClock();
+        clockAnimFrame = requestAnimationFrame(update);
+      }
+      update();
+    }
+    
+    // ============ Main ============
+    function fetchAllData() {
+      fetchClockData();
+      fetchLocationData();
+      fetchWeatherData();
+    }
+    
+    // Initialize
+    startClockLoop();
+    fetchAllData();
+    
+    // Auto-refresh weather every 10 minutes
+    setInterval(fetchWeatherData, 10 * 60 * 1000);
+  </script>
+</body>
+</html>

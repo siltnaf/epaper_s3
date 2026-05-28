@@ -101,120 +101,134 @@ app.post('/api/progress', async (req, res) => {
   }
 });
 
-// Helper: resolve client IP to geo info
-function resolveClientGeo(req) {
-  var clientIp = req.ip || req.connection.remoteAddress || req.socket.remoteAddress
+// API: Geo IP location - detect client city using geoip-lite database
+// More accurate than external IP APIs, especially for Chinese mobile users
+app.get('/api/geoip', (req, res) => {
+  // Get client IP - handles both direct and proxied connections
+  var clientIp = req.ip || req.connection.remoteAddress || req.socket.remoteAddress;
+  
+  // Normalize IPv6 mapped IPv4 addresses (e.g. "::ffff:127.0.0.1")
   if (clientIp.startsWith('::ffff:')) {
-    clientIp = clientIp.substring(7)
+    clientIp = clientIp.substring(7);
   }
+  
+  // Skip lookup for localhost/private IPs
+  var isPrivate = /^(127\.|10\.|172\.(1[6-9]|2[0-9]|3[01])\.|192\.168\.|::1$|localhost)/.test(clientIp);
+  if (isPrivate) {
+    // Local development - use a Shenzhen IP for testing
+    // This simulates how the geoip database would resolve a real Shenzhen IP
+    var fallback = geoip.lookup('218.17.0.1');
+    if (fallback && fallback.city) {
+      return res.json({
+        ip: clientIp,
+        city: fallback.city,
+        region: fallback.region,
+        country: fallback.country,
+        timezone: fallback.timezone,
+        ll: fallback.ll
+      });
+    }
+    return res.json({ ip: clientIp, city: null, timezone: null });
+  }
+  
+  var geo = geoip.lookup(clientIp);
+  if (geo && geo.city) {
+    res.json({
+      ip: clientIp,
+      city: geo.city,
+      region: geo.region,
+      country: geo.country,
+      timezone: geo.timezone,
+      ll: geo.ll
+    });
+  } else {
+    // Fallback: try to get timezone at least
+    res.json({
+      ip: clientIp,
+      city: null,
+      timezone: Intl.DateTimeFormat().resolvedOptions().timeZone
+    });
+  }
+});
+
+// API: Clock - returns server time info and timezone
+app.get('/api/clock', (req, res) => {
+  var clientIp = req.ip || req.connection.remoteAddress || req.socket.remoteAddress
+  if (clientIp.startsWith('::ffff:')) clientIp = clientIp.substring(7)
   var isPrivate = /^(127\.|10\.|172\.(1[6-9]|2[0-9]|3[01])\.|192\.168\.|::1$|localhost)/.test(clientIp)
+  var tz = 'Asia/Shanghai'
+  if (!isPrivate) {
+    var geo = geoip.lookup(clientIp)
+    if (geo && geo.timezone) tz = geo.timezone
+  }
+  var now = new Date()
+  res.json({
+    time: now.toISOString(),
+    timezone: tz,
+    timestamp: now.getTime()
+  })
+})
+
+// API: Location - returns detected city/location message and timezone
+app.get('/api/location', (req, res) => {
+  var clientIp = req.ip || req.connection.remoteAddress || req.socket.remoteAddress
+  if (clientIp.startsWith('::ffff:')) clientIp = clientIp.substring(7)
+  var isPrivate = /^(127\.|10\.|172\.(1[6-9]|2[0-9]|3[01])\.|192\.168\.|::1$|localhost)/.test(clientIp)
+  var city = null
+  var tz = 'Asia/Shanghai'
   if (isPrivate) {
     var fallback = geoip.lookup('218.17.0.1')
     if (fallback && fallback.city) {
-      return { ip: clientIp, city: fallback.city, region: fallback.region, country: fallback.country, timezone: fallback.timezone, ll: fallback.ll }
+      city = fallback.city
+      tz = fallback.timezone || tz
     }
-    return { ip: clientIp, city: null, region: null, country: null, timezone: null, ll: null }
+  } else {
+    var geo = geoip.lookup(clientIp)
+    if (geo && geo.city) {
+      city = geo.city
+      tz = geo.timezone || tz
+    }
   }
-  var geo = geoip.lookup(clientIp)
-  if (geo && geo.city) {
-    return { ip: clientIp, city: geo.city, region: geo.region, country: geo.country, timezone: geo.timezone, ll: geo.ll }
+  var cityZhMap = {
+    'Shenzhen': '深圳', 'Shanghai': '上海', 'Beijing': '北京',
+    'Guangzhou': '广州', 'Hangzhou': '杭州', 'Chengdu': '成都',
+    'Wuhan': '武汉', 'Nanjing': '南京', 'Tianjin': '天津',
+    'Chongqing': '重庆', 'Suzhou': '苏州', "Xi'an": '西安',
+    'Changsha': '长沙', 'Zhengzhou': '郑州', 'Dongguan': '东莞',
+    'Qingdao': '青岛', 'Shenyang': '沈阳', 'Ningbo': '宁波',
+    'Kunming': '昆明', 'Dalian': '大连', 'Xiamen': '厦门',
+    'Fuzhou': '福州', 'Hefei': '合肥', 'Wuxi': '无锡',
+    'Foshan': '佛山', 'Changzhou': '常州', 'Jinan': '济南',
+    'Harbin': '哈尔滨', 'Changchun': '长春', 'Lanzhou': '兰州',
+    'Guiyang': '贵阳', 'Nanning': '南宁', 'Taiyuan': '太原',
+    'Shijiazhuang': '石家庄', 'Haikou': '海口', 'Sanya': '三亚',
+    'Macau': '澳门', 'Hong Kong': '香港', 'Taipei': '台北'
   }
-  return { ip: clientIp, city: null, region: null, country: null, timezone: null, ll: null }
-}
-
-// City name translation map
-var cityZhMap = {
-  'Shenzhen': '深圳', 'Shanghai': '上海', 'Beijing': '北京', 'Guangzhou': '广州',
-  'Hangzhou': '杭州', 'Chengdu': '成都', 'Wuhan': '武汉', 'Nanjing': '南京',
-  'Tianjin': '天津', 'Chongqing': '重庆', 'Suzhou': '苏州', "Xi'an": '西安',
-  'Changsha': '长沙', 'Zhengzhou': '郑州', 'Dongguan': '东莞', 'Qingdao': '青岛',
-  'Shenyang': '沈阳', 'Ningbo': '宁波', 'Kunming': '昆明', 'Dalian': '大连',
-  'Xiamen': '厦门', 'Fuzhou': '福州', 'Hefei': '合肥', 'Wuxi': '无锡',
-  'Foshan': '佛山', 'Changzhou': '常州', 'Jinan': '济南', 'Harbin': '哈尔滨',
-  'Changchun': '长春', 'Lanzhou': '兰州', 'Guiyang': '贵阳', 'Nanning': '南宁',
-  'Taiyuan': '太原', 'Shijiazhuang': '石家庄', 'Haikou': '海口', 'Sanya': '三亚',
-  'Macau': '澳门', 'Hong Kong': '香港', 'Taipei': '台北'
-}
-
-function translateCityToZh(en) {
-  return cityZhMap[en] || en
-}
-
-// API: Geo IP location (legacy endpoint, kept for compatibility)
-app.get('/api/geoip', (req, res) => {
-  var info = resolveClientGeo(req)
-  res.json(info)
-})
-
-// API: Clock - returns current time and date based on IP-detected timezone
-app.get('/api/clock', (req, res) => {
-  var info = resolveClientGeo(req)
-  var tz = info.timezone || Intl.DateTimeFormat().resolvedOptions().timeZone
-  var now = new Date()
-  var timeParts = new Intl.DateTimeFormat('zh-CN', {
-    timeZone: tz,
-    hour: '2-digit',
-    minute: '2-digit',
-    second: '2-digit',
-    hour12: false
-  }).formatToParts(now)
-  var h = timeParts.find(function(p) { return p.type === 'hour' }).value
-  var m = timeParts.find(function(p) { return p.type === 'minute' }).value
-  var s = timeParts.find(function(p) { return p.type === 'second' }).value
-  var time = h + ':' + m + ':' + s
-
-  var date = new Intl.DateTimeFormat('zh-CN', {
-    timeZone: tz,
-    year: 'numeric',
-    month: 'long',
-    day: 'numeric',
-    weekday: 'long'
-  }).format(now)
-
+  var displayCity = city ? (cityZhMap[city] || city) : '当前位置'
   res.json({
-    time: time,
-    date: date,
+    city: city,
+    message: displayCity,
     timezone: tz
   })
 })
 
-// API: Location - returns location message based on IP detection
-app.get('/api/location', (req, res) => {
-  var info = resolveClientGeo(req)
-  var cityZh = info.city ? translateCityToZh(info.city) : null
-  var regionZh = info.region ? translateCityToZh(info.region) : null
-  // Build a location message
-  var message = ''
-  if (cityZh) {
-    message = cityZh
-    if (regionZh && regionZh !== cityZh) {
-      message = regionZh + ' ' + cityZh
-    }
-    if (info.country && info.country !== 'CN') {
-      message = message + ', ' + info.country
-    }
-  }
-  res.json({
-    city: cityZh,
-    region: regionZh,
-    country: info.country,
-    message: message,
-    ip: info.ip,
-    timezone: info.timezone
-  })
-})
-
-// API: Weather - auto-detects city from IP if no city parameter provided
+// API: Weather
 app.get('/api/weather', async (req, res) => {
   var city = req.query.city
+  // Auto-detect city from IP if not provided
   if (!city) {
-    // Auto-detect city from IP
-    var info = resolveClientGeo(req)
-    if (info.city) {
-      city = translateCityToZh(info.city)
+    var clientIp = req.ip || req.connection.remoteAddress || req.socket.remoteAddress
+    if (clientIp.startsWith('::ffff:')) clientIp = clientIp.substring(7)
+    var isPrivate = /^(127\.|10\.|172\.(1[6-9]|2[0-9]|3[01])\.|192\.168\.|::1$|localhost)/.test(clientIp)
+    if (isPrivate) {
+      var fallback = geoip.lookup('218.17.0.1')
+      if (fallback && fallback.city) city = fallback.city
+    } else {
+      var geo = geoip.lookup(clientIp)
+      if (geo && geo.city) city = geo.city
     }
+    if (!city) return res.status(400).json({ error: 'Missing city' })
   }
-  if (!city) return res.status(400).json({ error: '无法检测城市，请提供城市参数' })
   try {
     var response = await fetch('https://wttr.in/' + encodeURIComponent(city) + '?format=j1')
     var data = await response.json()
@@ -364,22 +378,29 @@ app.get('/api/poems/:id', async (req, res) => {
 });
 
 function startServer() {
-  // Always start HTTP server
-  http.createServer(app).listen(PORT, () => {
-    console.log(`Ebook API running on http://localhost:${PORT}`);
-  });
+  if (USE_HTTPS) {
+    if (!fs.existsSync(SSL_KEY) || !fs.existsSync(SSL_CERT)) {
+      console.error('HTTPS=true, but SSL key/certificate files were not found.');
+      console.error(`Expected key:  ${SSL_KEY}`);
+      console.error(`Expected cert: ${SSL_CERT}`);
+      console.error('Generate local certificates with: npm run cert:local');
+      process.exit(1);
+    }
 
-  // Optionally also start HTTPS server if certificates exist
-  if (fs.existsSync(SSL_KEY) && fs.existsSync(SSL_CERT)) {
     const credentials = {
       key: fs.readFileSync(SSL_KEY),
       cert: fs.readFileSync(SSL_CERT),
     };
-    const HTTPS_PORT = parseInt(PORT) + 1; // HTTPS on port 3002 by default
-    https.createServer(credentials, app).listen(HTTPS_PORT, () => {
-      console.log(`Ebook API running on https://localhost:${HTTPS_PORT}`);
+
+    https.createServer(credentials, app).listen(PORT, () => {
+      console.log(`Ebook API running on https://localhost:${PORT}`);
     });
+    return;
   }
+
+  http.createServer(app).listen(PORT, () => {
+    console.log(`Ebook API running on http://localhost:${PORT}`);
+  });
 }
 
 startServer();

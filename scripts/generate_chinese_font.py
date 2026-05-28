@@ -2,15 +2,29 @@ from pathlib import Path
 import re
 from PIL import Image, ImageDraw, ImageFont
 
-FONT_PATH = r"C:/Windows/Fonts/simhei.ttf"
+# Use DengXian Light to better match the thin, squared e-reader UI style
+# shown in f.jpg.  The previous SimHei source was much heavier/bolder,
+# which made long book content look dense on the e-paper screen.
+FONT_PATH = r"C:/Windows/Fonts/Dengl.ttf"
 FONT_SIZE = 24
 OUT = Path("examples/demo/chinese_font.h")
 
-seed = "书库本共册格林童话天方夜谭儿童绘本古诗图片学习作者分类未知寓言故事安徒生小王子"
+seed = "书库本共册格林童话天方夜谭儿童绘本古诗图片学习作者分类未知寓言故事安徒生小王子。，、：；！？“”‘’（）《》——…·"
 chars = set(seed)
-for p in Path("ebook").glob("*.js"):
-    s = p.read_text(encoding="utf-8", errors="ignore")
-    chars.update(re.findall(r"[\u3400-\u9fff]", s))
+# Scan the reference folder (JS and HTML files) and the examples folder for Chinese characters
+# plus CJK punctuation.  The reader renders book content with this bitmap font;
+# if punctuation is omitted, full-width marks fall back to small ASCII symbols or
+# blank advance space, which makes Chinese text look broken on the e-paper.
+for folder in ["reference", "examples"]:
+    for p in Path(folder).rglob("*.*"):
+        if "node_modules" in p.parts:
+            continue
+        if p.is_file() and p.suffix in [".js", ".html", ".ino", ".h"]:
+            try:
+                s = p.read_text(encoding="utf-8", errors="ignore")
+                chars.update(re.findall(r"[\u3400-\u9fff\u3000-\u303f\uff00-\uffef\u2018\u2019\u201c\u201d\u2014\u2026]", s))
+            except Exception as e:
+                print(f"Skipping {p}: {e}")
 
 chars = "".join(sorted(chars))
 font = ImageFont.truetype(FONT_PATH, FONT_SIZE)
