@@ -88,6 +88,7 @@ bool showingSdFolder = false;
 char sd_status_message[96] = "";
 bool touchWasPressed = false;
 bool lastWifiConnected = false;
+bool wifiEnabled = true;
 volatile bool wifiStatusRefreshPending = false;
 bool touchLatchActive = false;
 int16_t latchedTouchX = 0;
@@ -111,6 +112,7 @@ struct BookListItem {
     char title[80];
     char author[40];
     char category[40];
+    bool saved;
 };
 BookListItem book_items[MAX_BOOK_ITEMS];
 int book_count = 0;
@@ -166,6 +168,12 @@ const char keyboard_symbols[3][10] = {
 uint32_t clock_refresh_interval = 0;
 uint32_t auto_refresh_interval = 0;
 uint32_t wifi_reconnect_interval = 0;
+bool clock_hands_initialized = false;
+int32_t last_clock_hour_x = 0;
+int32_t last_clock_hour_y = 0;
+int32_t last_clock_minute_x = 0;
+int32_t last_clock_minute_y = 0;
+char last_clock_time_line[16] = "";
 char calcDisplay[24] = "0";
 char calcExpression[64] = "0";
 double calcStored = 0.0;
@@ -192,8 +200,10 @@ static const CalcButton calcButtons[] = {
 static void drawPortraitHome();
 static void drawAnalogClockScreen();
 static void refreshClockTimeArea();
+static void refreshClockHandsArea();
 static void drawCalculatorScreen();
 static void drawSettingsMenuScreen();
+static void toggleWifi();
 static void drawSettingsScreen();
 static void drawContentSettingsScreen();
 static void drawBookLibraryScreen();
@@ -249,6 +259,11 @@ static void loadContentUrl();
 static void saveContentUrl();
 static bool fetchBookLibrary();
 static void buildBooksApiUrl(char *out, size_t outSize);
+static bool saveBookToSd(int32_t bookId, const char *title, const char *author, const char *category, const char *content);
+static bool loadBookFromSd(int32_t bookId, char *title, char *author, char *category, String *content);
+static bool loadSavedBooksFromSd();
+static bool isBookSavedOnSd(int32_t bookId);
+static void drawBookSaveIcon(int32_t x, int32_t y, bool saved);
 
 static const uint8_t clockIcon50x50[] = {
     0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
@@ -334,6 +349,9 @@ static const int32_t BOOK_LIST_ROW_BOX_H = 60;
 static const int32_t BOOK_LIST_W = PORTRAIT_WIDTH - 44;
 static const int32_t BOOK_LIST_REFRESH_Y = 168;
 static const int32_t BOOK_LIST_REFRESH_BOTTOM_MARGIN = 8;
+static const int32_t BOOK_SAVE_ICON_SIZE = 28;
+static const int32_t BOOK_SAVE_ICON_MARGIN = 4;
+static const char BOOK_SD_FOLDER[] = "/books";
 static const int32_t BOOK_READER_CONTENT_X = 24;
 static const int32_t BOOK_READER_CONTENT_Y = 187;
 static const int32_t BOOK_READER_CONTENT_W = PORTRAIT_WIDTH - 48;
@@ -1658,13 +1676,32 @@ static void drawSettingsMenuScreen()
     drawPortraitTextInRectCentered("SD Card", 34, item2Y, 340, 90, (GFXfont *)&FiraSans);
     drawPortraitTextInRectCentered(">", 370, item2Y, 80, 90, (GFXfont *)&FiraSans);
 
-    // Menu Item 3: Volume
+    // Menu Item 3: WiFi Toggle
     int item3Y = 418;
     portraitFillRect(34, item3Y, 472, 90, 0xFF);
     portraitDrawRect(34, item3Y, 472, 90, 0x00);
     portraitDrawRect(36, item3Y + 2, 468, 86, 0x00);
-    drawPortraitTextInRectCentered("Volume", 34, item3Y, 340, 90, (GFXfont *)&FiraSans);
-    drawPortraitTextInRectCentered(">", 370, item3Y, 80, 90, (GFXfont *)&FiraSans);
+    drawPortraitTextInRectCentered("WiFi", 34, item3Y, 280, 90, (GFXfont *)&FiraSans);
+    const char *wifiStatus = wifiEnabled ? "ON" : "OFF";
+    drawPortraitTextInRectCentered(wifiStatus, 310, item3Y, 100, 90, (GFXfont *)&FiraSans);
+}
+
+static void toggleWifi()
+{
+    wifiEnabled = !wifiEnabled;
+    if (wifiEnabled) {
+        // Turn WiFi on
+        WiFi.mode(WIFI_STA);
+        if (saved_wifi_ssid[0] != '\0') {
+            WiFi.begin(saved_wifi_ssid, saved_wifi_password);
+        } else {
+            WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+        }
+    } else {
+        // Turn WiFi off
+        WiFi.disconnect(true);
+        WiFi.mode(WIFI_OFF);
+    }
 }
 
 static bool ensureSdReady()
@@ -1887,9 +1924,10 @@ static bool handleSettingsMenuTouch(int16_t tx, int16_t ty)
         return true;
     }
 
-    // Menu Item 3: Volume (Y=418) - placeholder for now
+    // Menu Item 3: WiFi Toggle (Y=418)
     if (pointInRect(px, py, 34, 418, 472, 90)) {
-        // Placeholder: stay on the menu for now
+        toggleWifi();
+        refreshDisplay(drawSettingsMenuScreen);
         return true;
     }
 
@@ -2304,9 +2342,39 @@ static void drawBookLibraryRowsArea()
         drawUtf8ChineseTextLeftAligned(book_items[i].title, BOOK_LIST_X + 16, y, BOOK_LIST_ROW_BOX_H);
 
         // Show category on the right side of the row (right-aligned, vertically centered).
+        // Leave space for save icon on the right
         if (book_items[i].category[0] != '\0') {
-            drawUtf8ChineseTextRightAligned(book_items[i].category, BOOK_LIST_X + BOOK_LIST_W - 16, y, BOOK_LIST_ROW_BOX_H);
+            drawUtf8ChineseTextRightAligned(book_items[i].category, BOOK_LIST_X + BOOK_LIST_W - BOOK_SAVE_ICON_SIZE - 20, y, BOOK_LIST_ROW_BOX_H);
         }
+    }
+
+    // Draw save icons inside the row boxes, near the right edge
+    for (int i = 0; i < book_count; ++i) {
+        const int32_t y = BOOK_LIST_Y + i * BOOK_LIST_ROW_H;
+        int32_t saveIconX = BOOK_LIST_X + BOOK_LIST_W - BOOK_SAVE_ICON_SIZE - 8;
+        int32_t saveIconY = y + (BOOK_LIST_ROW_BOX_H - BOOK_SAVE_ICON_SIZE) / 2;
+        drawBookSaveIcon(saveIconX, saveIconY, book_items[i].saved);
+    }
+}
+
+static void drawBookSaveIcon(int32_t x, int32_t y, bool saved)
+{
+    int32_t stride = (BOOK_SAVE_ICON_W + 7) / 8;
+    for (int32_t yy = 0; yy < BOOK_SAVE_ICON_H; ++yy) {
+        for (int32_t xx = 0; xx < BOOK_SAVE_ICON_W; ++xx) {
+            uint8_t packed = book_save_icon_24x24[yy * stride + xx / 8];
+            if (packed & (0x80 >> (xx & 7))) {
+                portraitPixel(x + xx, y + yy, saved ? 0x00 : 0x00);
+            }
+        }
+    }
+    // If saved, draw a filled checkmark overlay
+    if (saved) {
+        // Draw a small filled rectangle in the center to indicate saved
+        int32_t cx = x + BOOK_SAVE_ICON_W / 2;
+        int32_t cy = y + BOOK_SAVE_ICON_H / 2;
+        portraitFillRect(cx - 4, cy - 4, 8, 8, 0x00);
+        portraitFillRect(cx - 2, cy - 2, 4, 4, 0xFF);
     }
 }
 
@@ -2606,6 +2674,226 @@ static const int32_t CLOCK_WEATHER_BOX_H = 210;
 // Partial refresh area: time + date region (below clock face, above location)
 static const int32_t CLOCK_TIME_AREA_Y = CLOCK_TIME_Y - 10;
 static const int32_t CLOCK_TIME_AREA_H = 90;
+static const int32_t CLOCK_DIGITAL_CELL_COUNT = 5;
+static const int32_t CLOCK_DIGITAL_CELL_W[CLOCK_DIGITAL_CELL_COUNT] = {36, 36, 22, 36, 36};
+static const int32_t CLOCK_DIGITAL_CELL_H = 50;
+static const float CLOCK_DIGITAL_TIME_SCALE = 0.80f;
+
+static uint32_t millisUntilNextMinute(const struct tm &timeinfo)
+{
+    int32_t seconds = timeinfo.tm_sec;
+    if (seconds < 0 || seconds > 59) {
+        seconds = 0;
+    }
+    return (uint32_t)((60 - seconds) * 1000 + 200);
+}
+
+static int32_t clockDigitalTimeStartX()
+{
+    int32_t totalW = 0;
+    for (int32_t i = 0; i < CLOCK_DIGITAL_CELL_COUNT; ++i) {
+        totalW += CLOCK_DIGITAL_CELL_W[i];
+    }
+    return 34 + ((PORTRAIT_WIDTH - 68) - totalW) / 2;
+}
+
+static int32_t clockDigitalCellX(int32_t index)
+{
+    int32_t x = clockDigitalTimeStartX();
+    for (int32_t i = 0; i < index && i < CLOCK_DIGITAL_CELL_COUNT; ++i) {
+        x += CLOCK_DIGITAL_CELL_W[i];
+    }
+    return x;
+}
+
+static void drawClockDigitalTimeCell(char ch, int32_t index)
+{
+    if (index < 0 || index >= CLOCK_DIGITAL_CELL_COUNT) {
+        return;
+    }
+    char label[2] = {ch, '\0'};
+    drawPortraitTextInRectCenteredScaled(label,
+                                         clockDigitalCellX(index),
+                                         CLOCK_TIME_Y,
+                                         CLOCK_DIGITAL_CELL_W[index],
+                                         CLOCK_DIGITAL_CELL_H,
+                                         (GFXfont *)&FiraSans,
+                                         CLOCK_DIGITAL_TIME_SCALE);
+}
+
+static void drawClockDigitalTimeLine(const char *timeLine)
+{
+    if (!timeLine || strlen(timeLine) < CLOCK_DIGITAL_CELL_COUNT) {
+        return;
+    }
+    for (int32_t i = 0; i < CLOCK_DIGITAL_CELL_COUNT; ++i) {
+        drawClockDigitalTimeCell(timeLine[i], i);
+    }
+    snprintf(last_clock_time_line, sizeof(last_clock_time_line), "%s", timeLine);
+}
+
+static void refreshChangedClockDigitalTimeCells(const char *timeLine)
+{
+    if (!timeLine || strlen(timeLine) < CLOCK_DIGITAL_CELL_COUNT) {
+        return;
+    }
+
+    for (int32_t i = 0; i < CLOCK_DIGITAL_CELL_COUNT; ++i) {
+        if (last_clock_time_line[i] == timeLine[i]) {
+            continue;
+        }
+
+        const int32_t margin = 4;
+        const int32_t x = clockDigitalCellX(i) - margin;
+        const int32_t y = CLOCK_TIME_Y - margin;
+        const int32_t w = CLOCK_DIGITAL_CELL_W[i] + margin * 2;
+        const int32_t h = CLOCK_DIGITAL_CELL_H + margin * 2;
+
+        portraitFillRect(x, y, w, h, 0xFF);
+        drawClockDigitalTimeCell(timeLine[i], i);
+
+        Rect_t area = portraitRectToPhysicalRect(x, y, w, h);
+        uint8_t *areaBuffer = copyPhysicalAreaFromFramebuffer(area);
+        if (!areaBuffer) {
+            continue;
+        }
+
+        epd_poweron();
+        epd_push_pixels(area, 60, 1);
+        epd_push_pixels(area, 60, 1);
+        epd_draw_grayscale_image(area, areaBuffer);
+        epd_poweroff();
+        free(areaBuffer);
+    }
+
+    snprintf(last_clock_time_line, sizeof(last_clock_time_line), "%s", timeLine);
+}
+
+static void calculateClockHandEndpoints(const struct tm &timeinfo, int32_t *hourX, int32_t *hourY, int32_t *minuteX, int32_t *minuteY)
+{
+    const int32_t cx = PORTRAIT_WIDTH / 2;
+    const int32_t cy = CLOCK_CENTER_Y;
+    float minuteAngle = ((timeinfo.tm_min + timeinfo.tm_sec / 60.0f) * 6.0f - 90.0f) * DEG_TO_RAD;
+    float hourAngle = (((timeinfo.tm_hour % 12) + timeinfo.tm_min / 60.0f) * 30.0f - 90.0f) * DEG_TO_RAD;
+
+    if (hourX) *hourX = cx + (int32_t)(cosf(hourAngle) * 80);
+    if (hourY) *hourY = cy + (int32_t)(sinf(hourAngle) * 80);
+    if (minuteX) *minuteX = cx + (int32_t)(cosf(minuteAngle) * 125);
+    if (minuteY) *minuteY = cy + (int32_t)(sinf(minuteAngle) * 125);
+}
+
+static void redrawClockFaceDetails()
+{
+    const int32_t cx = PORTRAIT_WIDTH / 2;
+    const int32_t cy = CLOCK_CENTER_Y;
+    const int32_t r = CLOCK_RADIUS;
+
+    portraitDrawCircle(cx, cy, r, 0x00);
+    portraitDrawCircle(cx, cy, r - 1, 0x00);
+
+    for (int i = 0; i < 60; ++i) {
+        float a = (i * 6.0f - 90.0f) * DEG_TO_RAD;
+        int32_t outerX = cx + (int32_t)(cosf(a) * (r - 12));
+        int32_t outerY = cy + (int32_t)(sinf(a) * (r - 12));
+        int32_t innerR = (i % 5 == 0) ? r - 32 : r - 20;
+        int32_t innerX = cx + (int32_t)(cosf(a) * innerR);
+        int32_t innerY = cy + (int32_t)(sinf(a) * innerR);
+        drawThickPortraitLine(innerX, innerY, outerX, outerY, (i % 5 == 0) ? 3 : 1, 0x00);
+    }
+
+    for (int hour = 1; hour <= 12; ++hour) {
+        float a = (hour * 30.0f - 90.0f) * DEG_TO_RAD;
+        int32_t tx = cx + (int32_t)(cosf(a) * (r - 48));
+        int32_t ty = cy + (int32_t)(sinf(a) * (r - 48));
+        char hourLabel[3];
+        snprintf(hourLabel, sizeof(hourLabel), "%d", hour);
+        drawPortraitTextInRectCenteredScaled(hourLabel, tx - 16, ty - 16, 32, 32, (GFXfont *)&FiraSans, 0.38f);
+    }
+}
+
+static void drawClockHands(const struct tm &timeinfo)
+{
+    const int32_t cx = PORTRAIT_WIDTH / 2;
+    const int32_t cy = CLOCK_CENTER_Y;
+    int32_t hourX = 0;
+    int32_t hourY = 0;
+    int32_t minuteX = 0;
+    int32_t minuteY = 0;
+
+    calculateClockHandEndpoints(timeinfo, &hourX, &hourY, &minuteX, &minuteY);
+    drawThickPortraitLine(cx, cy, hourX, hourY, 7, 0x00);
+    drawThickPortraitLine(cx, cy, minuteX, minuteY, 5, 0x00);
+    portraitFillCircle(cx, cy, 10, 0x00);
+
+    last_clock_hour_x = hourX;
+    last_clock_hour_y = hourY;
+    last_clock_minute_x = minuteX;
+    last_clock_minute_y = minuteY;
+    clock_hands_initialized = true;
+}
+
+static void drawUtf8ChineseTextInRectSingleWidthScaled(const char *text, int32_t rx, int32_t ry, int32_t rw, int32_t rh, float scale)
+{
+    if (!text || text[0] == '\0' || scale <= 0.0f) {
+        return;
+    }
+
+    int32_t textW = (int32_t)ceilf(singleWidthTextWidth(text) * scale);
+    int32_t x = rx + (rw - textW) / 2;
+    if (x < rx + 2) {
+        x = rx + 2;
+    }
+
+    const float effectiveScale = BOOK_LIST_FONT_SCALE * scale;
+    int32_t scaledFontHeight = (int32_t)ceilf(ChineseFontHeight * effectiveScale);
+    int32_t y = ry + (rh - scaledFontHeight) / 2;
+    if (y < ry + 1) {
+        y = ry + 1;
+    }
+
+    const char *p = text;
+    uint32_t cp = 0;
+    while (utf8NextCodepoint(&p, &cp) && x < rx + rw - 2) {
+        if (cp < 0x80) {
+            char label[2] = {(char)cp, '\0'};
+            const int32_t charW = (int32_t)ceilf(12.0f * effectiveScale);
+            const int32_t charH = (int32_t)ceilf(36.0f * effectiveScale);
+            drawPortraitTextInRectCenteredScaled(label,
+                                                 x,
+                                                 y + scaledFontHeight / 2 - charH / 2,
+                                                 charW,
+                                                 charH,
+                                                 (GFXfont *)&FiraSans,
+                                                 effectiveScale);
+            x += (int32_t)ceilf(((cp == ' ') ? 8.0f : 12.0f) * effectiveScale);
+            continue;
+        }
+
+        const ChineseGlyph *glyph = findChineseGlyph(cp);
+        if (!glyph) {
+            x += (int32_t)ceilf(14.0f * effectiveScale);
+            continue;
+        }
+
+        const int32_t glyphW = (int32_t)ceilf(glyph->width * effectiveScale);
+        const int32_t glyphH = (int32_t)ceilf(glyph->height * effectiveScale);
+        for (int32_t dy = 0; dy < glyphH && y + dy < ry + rh - 1; ++dy) {
+            int32_t srcY = (int32_t)floorf(dy / effectiveScale);
+            if (srcY < 0) srcY = 0;
+            if (srcY >= glyph->height) srcY = glyph->height - 1;
+            for (int32_t dx = 0; dx < glyphW && x + dx < rx + rw - 2; ++dx) {
+                int32_t srcX = (int32_t)floorf(dx / effectiveScale);
+                if (srcX < 0) srcX = 0;
+                if (srcX >= glyph->width) srcX = glyph->width - 1;
+                uint8_t packed = ChineseFontBitmap[glyph->offset + srcY * glyph->rowBytes + srcX / 8];
+                if (packed & (0x80 >> (srcX & 7))) {
+                    portraitPixel(x + dx, y + dy, 0x00);
+                }
+            }
+        }
+        x += glyphW + (int32_t)ceilf(2.0f * effectiveScale);
+    }
+}
 
 static void drawClockChineseDateLine(const struct tm &timeinfo)
 {
@@ -2620,13 +2908,13 @@ static void drawClockChineseDateLine(const struct tm &timeinfo)
     snprintf(monthBuf, sizeof(monthBuf), "%02d", timeinfo.tm_mon + 1);
     snprintf(dayBuf, sizeof(dayBuf), "%02d", timeinfo.tm_mday);
 
-    drawPortraitTextInRectCenteredScaled(yearBuf, 88, y, 112, 38, (GFXfont *)&FiraSans, 0.50f);
-    drawUtf8ChineseTextInRectSingleWidth("年", 188, y, 34, 38);
-    drawPortraitTextInRectCenteredScaled(monthBuf, 218, y, 58, 38, (GFXfont *)&FiraSans, 0.50f);
-    drawUtf8ChineseTextInRectSingleWidth("月", 272, y, 34, 38);
-    drawPortraitTextInRectCenteredScaled(dayBuf, 302, y, 58, 38, (GFXfont *)&FiraSans, 0.50f);
-    drawUtf8ChineseTextInRectSingleWidth("日", 356, y, 34, 38);
-    drawUtf8ChineseTextInRectSingleWidth(weekdayZh[timeinfo.tm_wday], 398, y, 120, 38);
+    drawPortraitTextInRectCenteredScaled(yearBuf, 58, y - 8, 132, 54, (GFXfont *)&FiraSans, 0.75f);
+    drawUtf8ChineseTextInRectSingleWidthScaled("年", 178, y - 8, 44, 54, 1.0f);
+    drawPortraitTextInRectCenteredScaled(monthBuf, 218, y - 8, 60, 54, (GFXfont *)&FiraSans, 0.75f);
+    drawUtf8ChineseTextInRectSingleWidthScaled("月", 278, y - 8, 44, 54, 1.0f);
+    drawPortraitTextInRectCenteredScaled(dayBuf, 318, y - 8, 60, 54, (GFXfont *)&FiraSans, 0.75f);
+    drawUtf8ChineseTextInRectSingleWidthScaled("日", 378, y - 8, 44, 54, 1.0f);
+    drawUtf8ChineseTextInRectSingleWidthScaled(weekdayZh[timeinfo.tm_wday], 418, y - 8, 118, 54, 1.0f);
 }
 
 static void drawAnalogClockScreen()
@@ -2670,20 +2958,12 @@ static void drawAnalogClockScreen()
         drawPortraitTextInRectCenteredScaled(hourLabel, tx - 16, ty - 16, 32, 32, (GFXfont *)&FiraSans, 0.38f);
     }
 
-    float minuteAngle = ((timeinfo.tm_min + timeinfo.tm_sec / 60.0f) * 6.0f - 90.0f) * DEG_TO_RAD;
-    float hourAngle = (((timeinfo.tm_hour % 12) + timeinfo.tm_min / 60.0f) * 30.0f - 90.0f) * DEG_TO_RAD;
-    int32_t hourX = cx + (int32_t)(cosf(hourAngle) * 80);
-    int32_t hourY = cy + (int32_t)(sinf(hourAngle) * 80);
-    int32_t minuteX = cx + (int32_t)(cosf(minuteAngle) * 125);
-    int32_t minuteY = cy + (int32_t)(sinf(minuteAngle) * 125);
-    drawThickPortraitLine(cx, cy, hourX, hourY, 7, 0x00);
-    drawThickPortraitLine(cx, cy, minuteX, minuteY, 5, 0x00);
-    portraitFillCircle(cx, cy, 10, 0x00);
+    drawClockHands(timeinfo);
 
     // Digital time display - ASCII only, no Chinese mixing
     char timeLine[16];
     snprintf(timeLine, sizeof(timeLine), "%02d:%02d", timeinfo.tm_hour, timeinfo.tm_min);
-    drawPortraitTextInRectCenteredScaled(timeLine, 34, CLOCK_TIME_Y, PORTRAIT_WIDTH - 68, 48, (GFXfont *)&FiraSans, 0.80f);
+    drawClockDigitalTimeLine(timeLine);
 
     // Date display - Chinese format with smaller numeric glyphs.
     drawClockChineseDateLine(timeinfo);
@@ -2710,21 +2990,21 @@ static void drawAnalogClockScreen()
         // Temperature on left, weather desc on right
         char tempBuf[16];
         snprintf(tempBuf, sizeof(tempBuf), "%s", clock_weather.temp[0] ? clock_weather.temp : "--");
-        drawPortraitTextInRectCenteredScaled(tempBuf, 52, weatherBoxY + 22, 70, 38, (GFXfont *)&FiraSans, 0.50f);
+        drawPortraitTextInRectCenteredScaled(tempBuf, 52, weatherBoxY + 14, 82, 54, (GFXfont *)&FiraSans, 0.75f);
         // Degree symbol and C
-        drawUtf8ChineseTextInRectSingleWidth("度", 116, weatherBoxY + 20, 44, 40);
+        drawUtf8ChineseTextInRectSingleWidthScaled("度", 128, weatherBoxY + 14, 50, 54, 1.0f);
 
         // Weather description
         drawUtf8ChineseTextInRectSingleWidth(descZh, 174, weatherBoxY + 20, 170, 40);
 
         // Humidity and wind use separate Chinese labels + ASCII values to keep one consistent size and avoid overlap.
-        drawUtf8ChineseTextInRectSingleWidth("湿度", 70, weatherBoxY + 86, 90, 30);
-        drawPortraitTextInRectCenteredScaled(clock_weather.humidity[0] ? clock_weather.humidity : "--", 178, weatherBoxY + 84, 70, 34, (GFXfont *)&FiraSans, 0.38f);
-        drawPortraitTextInRectCenteredScaled("%", 240, weatherBoxY + 84, 36, 34, (GFXfont *)&FiraSans, 0.34f);
+        drawUtf8ChineseTextInRectSingleWidthScaled("湿度", 50, weatherBoxY + 78, 116, 46, 1.0f);
+        drawPortraitTextInRectCenteredScaled(clock_weather.humidity[0] ? clock_weather.humidity : "--", 184, weatherBoxY + 74, 86, 50, (GFXfont *)&FiraSans, 0.75f);
+        drawPortraitTextInRectCenteredScaled("%", 260, weatherBoxY + 74, 42, 50, (GFXfont *)&FiraSans, 0.75f);
 
-        drawUtf8ChineseTextInRectSingleWidth("风速", 70, weatherBoxY + 136, 90, 30);
-        drawPortraitTextInRectCenteredScaled(clock_weather.wind[0] ? clock_weather.wind : "--", 178, weatherBoxY + 134, 70, 34, (GFXfont *)&FiraSans, 0.38f);
-        drawUtf8ChineseTextInRectSingleWidth("公里/时", 252, weatherBoxY + 136, 150, 30);
+        drawUtf8ChineseTextInRectSingleWidthScaled("风速", 50, weatherBoxY + 132, 116, 46, 1.0f);
+        drawPortraitTextInRectCenteredScaled(clock_weather.wind[0] ? clock_weather.wind : "--", 184, weatherBoxY + 128, 86, 50, (GFXfont *)&FiraSans, 0.75f);
+        drawUtf8ChineseTextInRectSingleWidthScaled("千米每时", 276, weatherBoxY + 132, 180, 46, 1.0f);
     } else {
         drawUtf8ChineseTextInRectSingleWidth(clock_weather.status, 48, weatherBoxY + 50, PORTRAIT_WIDTH - 96, 60);
     }
@@ -2748,7 +3028,7 @@ static void refreshClockTimeArea()
 
     char timeLine[16];
     snprintf(timeLine, sizeof(timeLine), "%02d:%02d", timeinfo.tm_hour, timeinfo.tm_min);
-    drawPortraitTextInRectCenteredScaled(timeLine, 34, CLOCK_TIME_Y, PORTRAIT_WIDTH - 68, 50, (GFXfont *)&FiraSans, 0.85f);
+    drawClockDigitalTimeLine(timeLine);
 
     drawClockChineseDateLine(timeinfo);
 
@@ -2807,6 +3087,76 @@ static void refreshClockTimeArea()
     epd_draw_grayscale_image(area, areaBuffer);
     epd_poweroff();
     free(areaBuffer);
+}
+
+static void refreshClockHandsArea()
+{
+    time_t now = time(NULL);
+    struct tm timeinfo;
+    if (now < 100000 || !localtime_r(&now, &timeinfo)) {
+        memset(&timeinfo, 0, sizeof(timeinfo));
+        timeinfo.tm_hour = 10;
+        timeinfo.tm_min = 10;
+        timeinfo.tm_sec = 0;
+    }
+
+    const int32_t cx = PORTRAIT_WIDTH / 2;
+    const int32_t cy = CLOCK_CENTER_Y;
+    int32_t newHourX = 0;
+    int32_t newHourY = 0;
+    int32_t newMinuteX = 0;
+    int32_t newMinuteY = 0;
+    calculateClockHandEndpoints(timeinfo, &newHourX, &newHourY, &newMinuteX, &newMinuteY);
+    char timeLine[16];
+    snprintf(timeLine, sizeof(timeLine), "%02d:%02d", timeinfo.tm_hour, timeinfo.tm_min);
+
+    if (!clock_hands_initialized) {
+        last_clock_hour_x = newHourX;
+        last_clock_hour_y = newHourY;
+        last_clock_minute_x = newMinuteX;
+        last_clock_minute_y = newMinuteY;
+        clock_hands_initialized = true;
+    }
+
+    const int32_t margin = 18;
+    int32_t left = min(min(min(last_clock_hour_x, last_clock_minute_x), min(newHourX, newMinuteX)), cx) - margin;
+    int32_t top = min(min(min(last_clock_hour_y, last_clock_minute_y), min(newHourY, newMinuteY)), cy) - margin;
+    int32_t right = max(max(max(last_clock_hour_x, last_clock_minute_x), max(newHourX, newMinuteX)), cx) + margin;
+    int32_t bottom = max(max(max(last_clock_hour_y, last_clock_minute_y), max(newHourY, newMinuteY)), cy) + margin;
+
+    left = max((int32_t)0, left);
+    top = max((int32_t)0, top);
+    right = min(PORTRAIT_WIDTH, right);
+    bottom = min(PORTRAIT_HEIGHT, bottom);
+    int32_t refreshW = right - left;
+    int32_t refreshH = bottom - top;
+    if (refreshW <= 0 || refreshH <= 0) {
+        return;
+    }
+
+    // Only clear/redraw the small union bounds covering old + new hands.
+    portraitFillRect(left, top, refreshW, refreshH, 0xFF);
+    redrawClockFaceDetails();
+    drawClockHands(timeinfo);
+
+    Rect_t area = portraitRectToPhysicalRect(left, top, refreshW, refreshH);
+    uint8_t *areaBuffer = copyPhysicalAreaFromFramebuffer(area);
+    if (!areaBuffer) return;
+
+    epd_poweron();
+    // Condition only the small hand update rectangle before drawing the new
+    // hand image. Three black/white pulses reduce ghosting from the old hands
+    // while still avoiding a full clock/screen refresh.
+    for (int32_t i = 0; i < 3; ++i) {
+        epd_push_pixels(area, 70, 0);
+        epd_push_pixels(area, 70, 1);
+    }
+    epd_push_pixels(area, 70, 1);
+    epd_draw_grayscale_image(area, areaBuffer);
+    epd_poweroff();
+    free(areaBuffer);
+
+    refreshChangedClockDigitalTimeCells(timeLine);
 }
 
 static void drawCalculatorScreen()
@@ -3556,6 +3906,36 @@ static void processTouchRelease(int16_t x, int16_t y)
 
         for (int i = 0; i < book_count; ++i) {
             const int32_t rowY = BOOK_LIST_Y + i * BOOK_LIST_ROW_H;
+            
+            // Check if save icon was tapped (icon is inside the row, near right edge)
+            int32_t saveIconX = BOOK_LIST_X + BOOK_LIST_W - BOOK_SAVE_ICON_SIZE - 8;
+            int32_t saveIconY = rowY + (BOOK_LIST_ROW_BOX_H - BOOK_SAVE_ICON_SIZE) / 2;
+            if (touchHitsPortraitRect(x, y, saveIconX, saveIconY, BOOK_SAVE_ICON_SIZE, BOOK_SAVE_ICON_SIZE)) {
+                // Toggle save state
+                if (WiFi.status() == WL_CONNECTED && book_items[i].id > 0) {
+                    snprintf(book_library_status, sizeof(book_library_status), "Saving book %d...", book_items[i].id);
+                    refreshDisplay(drawBookLibraryScreen);
+                    
+                    // Fetch full book data if not already loaded
+                    if (selected_book_content.length() == 0 || selected_book_id != book_items[i].id) {
+                        if (fetchSelectedBook(book_items[i].id)) {
+                            saveBookToSd(book_items[i].id, book_items[i].title, book_items[i].author, book_items[i].category, selected_book_content.c_str());
+                            book_items[i].saved = true;
+                            snprintf(book_library_status, sizeof(book_library_status), "Book %d saved", book_items[i].id);
+                        } else {
+                            snprintf(book_library_status, sizeof(book_library_status), "Failed to save book %d", book_items[i].id);
+                        }
+                    } else {
+                        saveBookToSd(book_items[i].id, book_items[i].title, book_items[i].author, book_items[i].category, selected_book_content.c_str());
+                        book_items[i].saved = true;
+                        snprintf(book_library_status, sizeof(book_library_status), "Book %d saved", book_items[i].id);
+                    }
+                    refreshDisplay(drawBookLibraryScreen);
+                }
+                touch_loop_interval = millis() + 300;
+                return;
+            }
+            
             if (touchHitsPortraitRect(x, y, BOOK_LIST_X, rowY, BOOK_LIST_W, BOOK_LIST_ROW_BOX_H)) {
                 const int32_t tappedBookId = book_items[i].id;
                 const bool canUseCachedBook = (selected_book_id == tappedBookId && selected_book_content.length() > 0);
@@ -3658,7 +4038,13 @@ static void processTouchRelease(int16_t x, int16_t y)
         showingClock = true;
         fetchClockWeatherInfo();
         refreshDisplay(drawAnalogClockScreen);
-        clock_refresh_interval = millis() + 60000;
+        time_t now = time(NULL);
+        struct tm timeinfo;
+        if (now >= 100000 && localtime_r(&now, &timeinfo)) {
+            clock_refresh_interval = millis() + millisUntilNextMinute(timeinfo);
+        } else {
+            clock_refresh_interval = millis() + 60000;
+        }
         touch_loop_interval = millis() + 300;
         return;
     }
@@ -4173,16 +4559,159 @@ static bool fetchSelectedBook(int32_t bookId)
     return true;
 }
 
+
+static bool isBookSavedOnSd(int32_t bookId)
+{
+    if (!ensureSdReady()) {
+        return false;
+    }
+    char path[64];
+    snprintf(path, sizeof(path), "%s/%ld/meta.txt", BOOK_SD_FOLDER, (long)bookId);
+    return SD.exists(path);
+}
+
+static bool saveBookToSd(int32_t bookId, const char *title, const char *author, const char *category, const char *content)
+{
+    if (!ensureSdReady()) {
+        return false;
+    }
+    
+    // Create books directory if it doesn't exist
+    char dirPath[32];
+    snprintf(dirPath, sizeof(dirPath), "%s/%ld", BOOK_SD_FOLDER, (long)bookId);
+    if (!SD.exists(dirPath)) {
+        SD.mkdir(dirPath);
+    }
+    
+    // Save metadata
+    char metaPath[64];
+    snprintf(metaPath, sizeof(metaPath), "%s/meta.txt", dirPath);
+    File metaFile = SD.open(metaPath, FILE_WRITE);
+    if (!metaFile) {
+        Serial.println("Failed to open meta file for writing");
+        return false;
+    }
+    metaFile.printf("%ld\n%s\n%s\n%s\n", (long)bookId, title, author, category);
+    metaFile.close();
+    
+    // Save content
+    char contentPath[64];
+    snprintf(contentPath, sizeof(contentPath), "%s/content.txt", dirPath);
+    File contentFile = SD.open(contentPath, FILE_WRITE);
+    if (!contentFile) {
+        Serial.println("Failed to open content file for writing");
+        return false;
+    }
+    contentFile.print(content);
+    contentFile.close();
+    
+    Serial.printf("Book %ld saved to SD card\n", (long)bookId);
+    return true;
+}
+
+static bool loadBookFromSd(int32_t bookId, char *title, char *author, char *category, String *content)
+{
+    if (!ensureSdReady()) {
+        return false;
+    }
+    
+    char dirPath[32];
+    snprintf(dirPath, sizeof(dirPath), "%s/%ld", BOOK_SD_FOLDER, (long)bookId);
+    
+    // Load metadata
+    char metaPath[64];
+    snprintf(metaPath, sizeof(metaPath), "%s/meta.txt", dirPath);
+    File metaFile = SD.open(metaPath, FILE_READ);
+    if (!metaFile) {
+        return false;
+    }
+    
+    // Skip ID line
+    metaFile.readStringUntil('\n');
+    // Read title
+    String t = metaFile.readStringUntil('\n');
+    t.trim();
+    snprintf(title, 80, "%s", t.c_str());
+    // Read author
+    String a = metaFile.readStringUntil('\n');
+    a.trim();
+    snprintf(author, 40, "%s", a.c_str());
+    // Read category
+    String c = metaFile.readStringUntil('\n');
+    c.trim();
+    snprintf(category, 40, "%s", c.c_str());
+    metaFile.close();
+    
+    // Load content
+    char contentPath[64];
+    snprintf(contentPath, sizeof(contentPath), "%s/content.txt", dirPath);
+    File contentFile = SD.open(contentPath, FILE_READ);
+    if (!contentFile) {
+        return false;
+    }
+    *content = contentFile.readString();
+    contentFile.close();
+    
+    Serial.printf("Book %ld loaded from SD card\n", (long)bookId);
+    return true;
+}
+
+static bool loadSavedBooksFromSd()
+{
+    if (!ensureSdReady()) {
+        return false;
+    }
+    
+    File booksDir = SD.open(BOOK_SD_FOLDER);
+    if (!booksDir || !booksDir.isDirectory()) {
+        return false;
+    }
+    
+    book_count = 0;
+    File entry = booksDir.openNextFile();
+    while (entry && book_count < MAX_BOOK_ITEMS) {
+        if (entry.isDirectory()) {
+            int32_t bookId = atoi(entry.name());
+            if (bookId > 0) {
+                char title[80], author[40], category[40];
+                String content;
+                if (loadBookFromSd(bookId, title, author, category, &content)) {
+                    book_items[book_count].id = bookId;
+                    snprintf(book_items[book_count].title, sizeof(book_items[book_count].title), "%s", title);
+                    snprintf(book_items[book_count].author, sizeof(book_items[book_count].author), "%s", author);
+                    snprintf(book_items[book_count].category, sizeof(book_items[book_count].category), "%s", category);
+                    book_items[book_count].saved = true;
+                    book_count++;
+                }
+            }
+        }
+        entry.close();
+        entry = booksDir.openNextFile();
+    }
+    booksDir.close();
+    
+    if (book_count > 0) {
+        snprintf(book_library_status, sizeof(book_library_status), "Loaded %d books from SD", book_count);
+        return true;
+    }
+    return false;
+}
+
 static bool fetchBookLibrary()
 {
-    BookListItem fetched_items[MAX_BOOK_ITEMS];
-    int fetched_count = 0;
-    int fetched_total = book_total;
-
+    // Try loading from SD card first when WiFi is not available
     if (WiFi.status() != WL_CONNECTED) {
+        if (loadSavedBooksFromSd()) {
+            book_total = book_count;
+            return true;
+        }
         snprintf(book_library_status, sizeof(book_library_status), "WiFi not connected");
         return false;
     }
+
+    BookListItem fetched_items[MAX_BOOK_ITEMS];
+    int fetched_count = 0;
+    int fetched_total = book_total;
 
     char url[320];
     buildBooksApiUrl(url, sizeof(url));
@@ -4230,6 +4759,7 @@ static bool fetchBookLibrary()
         copyBookTitle(book.title, sizeof(book.title), item);
         copyJsonString(book.author, sizeof(book.author), item, "author", "");
         copyJsonString(book.category, sizeof(book.category), item, "category", "");
+        book.saved = isBookSavedOnSd(book.id);
         ++fetched_count;
     }
 
@@ -4416,7 +4946,7 @@ void loop()
         refreshWifiStatusIconArea();
     }
 
-    if (!wifiConnected && saved_wifi_ssid[0] != '\0' && millis() > wifi_reconnect_interval) {
+    if (!wifiConnected && wifiEnabled && saved_wifi_ssid[0] != '\0' && millis() > wifi_reconnect_interval) {
         wifi_reconnect_interval = millis() + 5000;
         Serial.printf("WiFi disconnected, retrying saved SSID: %s\n", saved_wifi_ssid);
         WiFi.disconnect();
@@ -4429,7 +4959,13 @@ void loop()
         auto_refresh_interval = millis() + 150000;
         if (showingClock) {
             refreshDisplayExtended(drawAnalogClockScreen, true);
-            clock_refresh_interval = millis() + 60000;
+            time_t now = time(NULL);
+            struct tm timeinfo;
+            if (now >= 100000 && localtime_r(&now, &timeinfo)) {
+                clock_refresh_interval = millis() + millisUntilNextMinute(timeinfo);
+            } else {
+                clock_refresh_interval = millis() + 60000;
+            }
         } else if (showingCalculator) {
             refreshDisplayExtended(drawCalculatorScreen, true);
         } else if (showingSettings) {
@@ -4452,9 +4988,16 @@ void loop()
     }
 
     if (showingClock && !showingCalculator && millis() > clock_refresh_interval) {
-        // Use partial refresh for regular 1-minute updates (only refreshes clock face + time area)
-        refreshClockTimeArea();
-        clock_refresh_interval = millis() + 60000;
+        // Tight partial refresh: only update the union rectangle around the
+        // previous and current hour/minute hands.
+        refreshClockHandsArea();
+        time_t now = time(NULL);
+        struct tm timeinfo;
+        if (now >= 100000 && localtime_r(&now, &timeinfo)) {
+            clock_refresh_interval = millis() + millisUntilNextMinute(timeinfo);
+        } else {
+            clock_refresh_interval = millis() + 60000;
+        }
     }
 
     if (touchOnline) {
