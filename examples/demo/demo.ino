@@ -127,6 +127,9 @@ char book_reader_status[96] = "Select a book";
 String selected_book_content;
 int32_t book_reader_page = 0;
 int32_t book_reader_total_pages = 1;
+bool pending_book_auto_save = false;
+int32_t pending_book_auto_save_id = 0;
+uint32_t pending_book_auto_save_after = 0;
 
 struct ClockWeatherInfo {
     char city[64];
@@ -264,6 +267,10 @@ static bool loadBookFromSd(int32_t bookId, char *title, char *author, char *cate
 static bool loadSavedBooksFromSd();
 static bool isBookSavedOnSd(int32_t bookId);
 static void drawBookSaveIcon(int32_t x, int32_t y, bool saved);
+static void refreshBookSaveIconArea(int bookIndex);
+static bool fetchAndSaveBookItem(BookListItem &book);
+static void queueSelectedBookAutoSave();
+static void processPendingBookAutoSave();
 
 static const uint8_t clockIcon50x50[] = {
     0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
@@ -360,6 +367,7 @@ static const int32_t BOOK_READER_CHARS_PER_LINE = 14;
 static const float BOOK_LIST_FONT_SCALE = 1.21f;
 static const float BOOK_READER_FONT_SCALE = 1.61f;
 static const float BOOK_READER_FONT_X_SCALE = 0.88f; // squared, e-reader-like width
+static const int32_t BOOK_READER_FONT_BOLD_PIXELS = 1; // about +20% visual stroke weight for reader content
 static const int32_t SETTINGS_MENU_ITEM_X = 54;
 static const int32_t SETTINGS_MENU_ITEM_W = PORTRAIT_WIDTH - 108;
 static const int32_t SETTINGS_MENU_ITEM_H = 86;
@@ -1078,13 +1086,13 @@ static void drawAsciiSingleWidthChar(char ch, int32_t x, int32_t y)
 static void drawAsciiSingleWidthCharReader(char ch, int32_t x, int32_t y)
 {
     char label[2] = {ch, '\0'};
-    drawPortraitTextInRectCenteredScaled(label,
-                                         x,
-                                         y - (int32_t)ceilf(18.0f * BOOK_READER_FONT_SCALE),
-                                         (int32_t)ceilf(12.0f * BOOK_READER_FONT_SCALE),
-                                         (int32_t)ceilf(36.0f * BOOK_READER_FONT_SCALE),
-                                         (GFXfont *)&FiraSans,
-                                         BOOK_READER_FONT_SCALE);
+    const int32_t charY = y - (int32_t)ceilf(18.0f * BOOK_READER_FONT_SCALE);
+    const int32_t charW = (int32_t)ceilf(12.0f * BOOK_READER_FONT_SCALE);
+    const int32_t charH = (int32_t)ceilf(36.0f * BOOK_READER_FONT_SCALE);
+    drawPortraitTextInRectCenteredScaled(label, x, charY, charW, charH, (GFXfont *)&FiraSans, BOOK_READER_FONT_SCALE);
+    // Reader content only: redraw one pixel to the right to increase stroke weight
+    // without changing layout, line wrapping, or the book-list/title typography.
+    drawPortraitTextInRectCenteredScaled(label, x + BOOK_READER_FONT_BOLD_PIXELS, charY, charW, charH, (GFXfont *)&FiraSans, BOOK_READER_FONT_SCALE);
 }
 
 static char punctuationFallbackChar(uint32_t cp)
@@ -1195,6 +1203,11 @@ static void drawChineseGlyphScaledX(const ChineseGlyph *glyph, int32_t x, int32_
             uint8_t packed = ChineseFontBitmap[glyph->offset + srcY * glyph->rowBytes + srcX / 8];
             if (packed & (0x80 >> (srcX & 7))) {
                 portraitPixel(x + dx, y + dy, 0x00);
+                for (int32_t bold = 1; bold <= BOOK_READER_FONT_BOLD_PIXELS; ++bold) {
+                    if (x + dx + bold < clipRight) {
+                        portraitPixel(x + dx + bold, y + dy, 0x00);
+                    }
+                }
             }
         }
     }
@@ -2310,6 +2323,7 @@ static void drawBookLibraryRowsArea()
             displayedCount = book_total;
         }
         snprintf(summary, sizeof(summary), "%d/%d", displayedCount, book_total);
+        portraitFillRect(54, 126, PORTRAIT_WIDTH - 108, 38, 0xFF);
         drawPortraitTextInRectCenteredScaled(summary,
                                              54,
                                              132,
@@ -2359,22 +2373,17 @@ static void drawBookLibraryRowsArea()
 
 static void drawBookSaveIcon(int32_t x, int32_t y, bool saved)
 {
+    // Unsaved: normal black icon on white. Saved: inverted white icon on black
+    // so the user can see the saved state from the list without redrawing the page.
+    portraitFillRect(x - 2, y - 2, BOOK_SAVE_ICON_SIZE + 4, BOOK_SAVE_ICON_SIZE + 4, saved ? 0x00 : 0xFF);
     int32_t stride = (BOOK_SAVE_ICON_W + 7) / 8;
     for (int32_t yy = 0; yy < BOOK_SAVE_ICON_H; ++yy) {
         for (int32_t xx = 0; xx < BOOK_SAVE_ICON_W; ++xx) {
             uint8_t packed = book_save_icon_24x24[yy * stride + xx / 8];
             if (packed & (0x80 >> (xx & 7))) {
-                portraitPixel(x + xx, y + yy, saved ? 0x00 : 0x00);
+                portraitPixel(x + xx, y + yy, saved ? 0xFF : 0x00);
             }
         }
-    }
-    // If saved, draw a filled checkmark overlay
-    if (saved) {
-        // Draw a small filled rectangle in the center to indicate saved
-        int32_t cx = x + BOOK_SAVE_ICON_W / 2;
-        int32_t cy = y + BOOK_SAVE_ICON_H / 2;
-        portraitFillRect(cx - 4, cy - 4, 8, 8, 0x00);
-        portraitFillRect(cx - 2, cy - 2, 4, 4, 0xFF);
     }
 }
 
@@ -2566,6 +2575,9 @@ static void drawBookReaderScreen()
 
     const char *title = selected_book_title[0] != '\0' ? selected_book_title : book_reader_status;
     drawUtf8ChineseTextLeftAlignedClipped(title, 24, 84, BOOK_NAV_UP_X - 48, 40);
+    // Reader title only: redraw one pixel to the right to match the
+    // approximately +20% stroke weight used by book content text.
+    drawUtf8ChineseTextLeftAlignedClipped(title, 24 + BOOK_READER_FONT_BOLD_PIXELS, 84, BOOK_NAV_UP_X - 48, 40);
 
     // Reuse the existing book-library up/down icons for reader page navigation.
     drawBitmapIcon1bpp(BOOK_NAV_UP_X, BOOK_NAV_UP_Y, BOOK_NAV_ICON_SIZE, BOOK_NAV_ICON_SIZE, book_nav_up_icon_64x64, 0x00);
@@ -3567,18 +3579,27 @@ static void refreshSdStatusArea()
 static void refreshBookLibraryListArea()
 {
     // For page up/down navigation, keep the header area unchanged on the EPD:
-    // home/status bar, "书库", count, and up/down icons are not refreshed.
-    // Only the rows below the icon/header band are wiped and replaced.
+    // home/status bar, "书库", and up/down icons are not refreshed.
+    // Refresh the page counter separately plus the rows below the icon/header band.
     drawBookLibraryRowsArea();
+
+    Rect_t counterArea = portraitRectToPhysicalRect(54, 126, PORTRAIT_WIDTH - 108, 38);
+    uint8_t *counterBuffer = copyPhysicalAreaFromFramebuffer(counterArea);
 
     const int32_t listRefreshH = PORTRAIT_HEIGHT - BOOK_LIST_REFRESH_Y - BOOK_LIST_REFRESH_BOTTOM_MARGIN;
     Rect_t listArea = portraitRectToPhysicalRect(0, BOOK_LIST_REFRESH_Y, PORTRAIT_WIDTH, listRefreshH);
     uint8_t *listBuffer = copyPhysicalAreaFromFramebuffer(listArea);
-    if (!listBuffer) {
+    if (!counterBuffer || !listBuffer) {
+        if (counterBuffer) free(counterBuffer);
+        if (listBuffer) free(listBuffer);
         return;
     }
 
     epd_poweron();
+    epd_push_pixels(counterArea, 60, 1);
+    epd_push_pixels(counterArea, 60, 1);
+    epd_draw_grayscale_image(counterArea, counterBuffer);
+
     for (int32_t i = 0; i < 2; ++i) {
         epd_push_pixels(listArea, 70, 0);
         epd_push_pixels(listArea, 70, 1);
@@ -3587,7 +3608,37 @@ static void refreshBookLibraryListArea()
     epd_draw_grayscale_image(listArea, listBuffer);
     epd_poweroff();
 
+    free(counterBuffer);
     free(listBuffer);
+}
+
+static void refreshBookSaveIconArea(int bookIndex)
+{
+    if (bookIndex < 0 || bookIndex >= book_count) {
+        return;
+    }
+
+    const int32_t rowY = BOOK_LIST_Y + bookIndex * BOOK_LIST_ROW_H;
+    const int32_t saveIconX = BOOK_LIST_X + BOOK_LIST_W - BOOK_SAVE_ICON_SIZE - 8;
+    const int32_t saveIconY = rowY + (BOOK_LIST_ROW_BOX_H - BOOK_SAVE_ICON_SIZE) / 2;
+    const int32_t margin = 4;
+
+    drawBookSaveIcon(saveIconX, saveIconY, book_items[bookIndex].saved);
+
+    Rect_t iconArea = portraitRectToPhysicalRect(saveIconX - margin,
+                                                 saveIconY - margin,
+                                                 BOOK_SAVE_ICON_SIZE + margin * 2,
+                                                 BOOK_SAVE_ICON_SIZE + margin * 2);
+    uint8_t *iconBuffer = copyPhysicalAreaFromFramebuffer(iconArea);
+    if (!iconBuffer) {
+        return;
+    }
+
+    epd_poweron();
+    epd_draw_grayscale_image(iconArea, iconBuffer);
+    epd_poweroff();
+
+    free(iconBuffer);
 }
 
 static void refreshBookReaderContentArea()
@@ -3911,26 +3962,13 @@ static void processTouchRelease(int16_t x, int16_t y)
             int32_t saveIconX = BOOK_LIST_X + BOOK_LIST_W - BOOK_SAVE_ICON_SIZE - 8;
             int32_t saveIconY = rowY + (BOOK_LIST_ROW_BOX_H - BOOK_SAVE_ICON_SIZE) / 2;
             if (touchHitsPortraitRect(x, y, saveIconX, saveIconY, BOOK_SAVE_ICON_SIZE, BOOK_SAVE_ICON_SIZE)) {
-                // Toggle save state
-                if (WiFi.status() == WL_CONNECTED && book_items[i].id > 0) {
-                    snprintf(book_library_status, sizeof(book_library_status), "Saving book %d...", book_items[i].id);
-                    refreshDisplay(drawBookLibraryScreen);
-                    
-                    // Fetch full book data if not already loaded
-                    if (selected_book_content.length() == 0 || selected_book_id != book_items[i].id) {
-                        if (fetchSelectedBook(book_items[i].id)) {
-                            saveBookToSd(book_items[i].id, book_items[i].title, book_items[i].author, book_items[i].category, selected_book_content.c_str());
-                            book_items[i].saved = true;
-                            snprintf(book_library_status, sizeof(book_library_status), "Book %d saved", book_items[i].id);
-                        } else {
-                            snprintf(book_library_status, sizeof(book_library_status), "Failed to save book %d", book_items[i].id);
-                        }
-                    } else {
-                        saveBookToSd(book_items[i].id, book_items[i].title, book_items[i].author, book_items[i].category, selected_book_content.c_str());
+                // Manual save: fetch and write in the background, then update only
+                // the save icon. Do not refresh the book-list screen.
+                if (book_items[i].id > 0 && !book_items[i].saved && WiFi.status() == WL_CONNECTED) {
+                    if (fetchAndSaveBookItem(book_items[i])) {
                         book_items[i].saved = true;
-                        snprintf(book_library_status, sizeof(book_library_status), "Book %d saved", book_items[i].id);
+                        refreshBookSaveIconArea(i);
                     }
-                    refreshDisplay(drawBookLibraryScreen);
                 }
                 touch_loop_interval = millis() + 300;
                 return;
@@ -3960,6 +3998,7 @@ static void processTouchRelease(int16_t x, int16_t y)
                 showingBookLibrary = false;
                 showingBookReader = true;
                 refreshDisplay(drawBookReaderScreen);
+                queueSelectedBookAutoSave();
                 touch_loop_interval = millis() + 300;
                 return;
             }
@@ -4021,6 +4060,16 @@ static void processTouchRelease(int16_t x, int16_t y)
         book_count = 0;
         book_total = 0;
         book_current_page = 1;
+        if (WiFi.status() != WL_CONNECTED) {
+            memset(framebuffer, 0xFF, EPD_WIDTH * EPD_HEIGHT / 2);
+            drawTopStatusBar();
+            drawPortraitTextCentered("wifi is not connected", 400, (GFXfont *)&FiraSans);
+            epd_poweron();
+            epd_clear();
+            epd_draw_grayscale_image(epd_full_screen(), framebuffer);
+            epd_poweroff();
+            delay(2000);
+        }
         fetchBookLibrary();
         refreshDisplay(drawBookLibraryScreen);
         touch_loop_interval = millis() + 300;
@@ -4511,6 +4560,13 @@ static void updateBookReaderPagination()
 static bool fetchSelectedBook(int32_t bookId)
 {
     if (WiFi.status() != WL_CONNECTED) {
+        if (loadBookFromSd(bookId, selected_book_title, selected_book_author, selected_book_category, &selected_book_content)) {
+            selected_book_id = bookId;
+            book_reader_page = 0;
+            updateBookReaderPagination();
+            snprintf(book_reader_status, sizeof(book_reader_status), "Loaded from SD");
+            return true;
+        }
         snprintf(book_reader_status, sizeof(book_reader_status), "WiFi not connected");
         return false;
     }
@@ -4559,6 +4615,55 @@ static bool fetchSelectedBook(int32_t bookId)
     return true;
 }
 
+static void queueSelectedBookAutoSave()
+{
+    if (WiFi.status() != WL_CONNECTED || selected_book_id <= 0 || selected_book_content.length() == 0) {
+        return;
+    }
+    if (isBookSavedOnSd(selected_book_id)) {
+        for (int i = 0; i < book_count; ++i) {
+            if (book_items[i].id == selected_book_id) {
+                book_items[i].saved = true;
+                break;
+            }
+        }
+        return;
+    }
+
+    pending_book_auto_save = true;
+    pending_book_auto_save_id = selected_book_id;
+    pending_book_auto_save_after = millis() + 50;
+    Serial.printf("Queued book %ld for SD auto-save after display\n", (long)selected_book_id);
+}
+
+static void processPendingBookAutoSave()
+{
+    if (!pending_book_auto_save || millis() < pending_book_auto_save_after) {
+        return;
+    }
+
+    const int32_t bookId = pending_book_auto_save_id;
+    pending_book_auto_save = false;
+    pending_book_auto_save_id = 0;
+
+    if (bookId <= 0 || selected_book_id != bookId || selected_book_content.length() == 0) {
+        return;
+    }
+
+    Serial.printf("Background SD auto-save for displayed book %ld\n", (long)bookId);
+    if (saveBookToSd(bookId, selected_book_title, selected_book_author, selected_book_category, selected_book_content.c_str())) {
+        for (int i = 0; i < book_count; ++i) {
+            if (book_items[i].id == bookId) {
+                book_items[i].saved = true;
+                if (showingBookLibrary) {
+                    refreshBookSaveIconArea(i);
+                }
+                break;
+            }
+        }
+    }
+}
+
 
 static bool isBookSavedOnSd(int32_t bookId)
 {
@@ -4576,6 +4681,10 @@ static bool saveBookToSd(int32_t bookId, const char *title, const char *author, 
         return false;
     }
     
+    if (!SD.exists(BOOK_SD_FOLDER)) {
+        SD.mkdir(BOOK_SD_FOLDER);
+    }
+
     // Create books directory if it doesn't exist
     char dirPath[32];
     snprintf(dirPath, sizeof(dirPath), "%s/%ld", BOOK_SD_FOLDER, (long)bookId);
@@ -4586,6 +4695,9 @@ static bool saveBookToSd(int32_t bookId, const char *title, const char *author, 
     // Save metadata
     char metaPath[64];
     snprintf(metaPath, sizeof(metaPath), "%s/meta.txt", dirPath);
+    if (SD.exists(metaPath)) {
+        SD.remove(metaPath);
+    }
     File metaFile = SD.open(metaPath, FILE_WRITE);
     if (!metaFile) {
         Serial.println("Failed to open meta file for writing");
@@ -4597,6 +4709,9 @@ static bool saveBookToSd(int32_t bookId, const char *title, const char *author, 
     // Save content
     char contentPath[64];
     snprintf(contentPath, sizeof(contentPath), "%s/content.txt", dirPath);
+    if (SD.exists(contentPath)) {
+        SD.remove(contentPath);
+    }
     File contentFile = SD.open(contentPath, FILE_WRITE);
     if (!contentFile) {
         Serial.println("Failed to open content file for writing");
@@ -4606,6 +4721,60 @@ static bool saveBookToSd(int32_t bookId, const char *title, const char *author, 
     contentFile.close();
     
     Serial.printf("Book %ld saved to SD card\n", (long)bookId);
+    return true;
+}
+
+static bool fetchAndSaveBookItem(BookListItem &book)
+{
+    if (WiFi.status() != WL_CONNECTED || book.id <= 0) {
+        return false;
+    }
+
+    char url[320];
+    buildBookDetailApiUrl(url, sizeof(url), book.id);
+    if (url[0] == '\0') {
+        return false;
+    }
+
+    String payload;
+    char status[96];
+    bool loaded = false;
+    for (int attempt = 1; attempt <= 3 && !loaded; ++attempt) {
+        Serial.printf("Saving book %ld in background (try %d/3): %s\n", (long)book.id, attempt, url);
+        loaded = httpGetString(url, payload, status, sizeof(status), 20000);
+        if (!loaded && attempt < 3) {
+            WiFiClient().stop();
+            delay(1200);
+        }
+    }
+    if (!loaded) {
+        Serial.printf("Failed to fetch book %ld for SD save: %s\n", (long)book.id, status);
+        return false;
+    }
+
+    JsonDocument doc;
+    DeserializationError err = deserializeJson(doc, payload);
+    if (err) {
+        Serial.printf("Save book JSON parse failed: %s\n", err.c_str());
+        return false;
+    }
+
+    JsonObject item = doc.as<JsonObject>();
+    char title[80];
+    char author[40];
+    char category[40];
+    copyBookTitle(title, sizeof(title), item);
+    copyJsonString(author, sizeof(author), item, "author", book.author);
+    copyJsonString(category, sizeof(category), item, "category", book.category);
+    const char *content = item["content"] | "";
+
+    if (!saveBookToSd(book.id, title, author, category, content)) {
+        return false;
+    }
+
+    snprintf(book.title, sizeof(book.title), "%s", title);
+    snprintf(book.author, sizeof(book.author), "%s", author);
+    snprintf(book.category, sizeof(book.category), "%s", category);
     return true;
 }
 
@@ -4671,7 +4840,9 @@ static bool loadSavedBooksFromSd()
     File entry = booksDir.openNextFile();
     while (entry && book_count < MAX_BOOK_ITEMS) {
         if (entry.isDirectory()) {
-            int32_t bookId = atoi(entry.name());
+            const char *entryName = entry.name();
+            const char *lastSlash = strrchr(entryName, '/');
+            int32_t bookId = atoi(lastSlash ? lastSlash + 1 : entryName);
             if (bookId > 0) {
                 char title[80], author[40], category[40];
                 String content;
@@ -4932,6 +5103,8 @@ void setup()
 
 void loop()
 {
+    processPendingBookAutoSave();
+
     // Check if NTP time is synced and RTC is not synced
     if (ntp_synced && !rtc_synced) {
         rtc_synced = true;
