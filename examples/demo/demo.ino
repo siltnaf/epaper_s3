@@ -90,9 +90,14 @@ bool touchWasPressed = false;
 bool lastWifiConnected = false;
 bool wifiEnabled = true;
 volatile bool wifiStatusRefreshPending = false;
+volatile bool contentServerWarmupPending = false;
+bool contentServerWarmed = false;
+uint32_t lastContentServerWarmup = 0;
 bool touchLatchActive = false;
 int16_t latchedTouchX = 0;
 int16_t latchedTouchY = 0;
+int16_t releasedTouchX = 0;
+int16_t releasedTouchY = 0;
 uint32_t lastTouchReleaseTime = 0;
 
 #define MAX_SCANNED_WIFI 10
@@ -193,17 +198,18 @@ struct CalcButton {
 };
 
 static const CalcButton calcButtons[] = {
-    {"C", calc_key_icon_c, 34, 270, 105, 76}, {"<-", calc_key_icon_delete, 153, 270, 105, 76}, {"/", calc_key_icon_solidus, 272, 270, 105, 76}, {"*", calc_key_icon_asterisk, 391, 270, 105, 76},
-    {"7", calc_key_icon_7, 34, 362, 105, 76}, {"8", calc_key_icon_8, 153, 362, 105, 76}, {"9", calc_key_icon_9, 272, 362, 105, 76}, {"-", calc_key_icon_minus, 391, 362, 105, 76},
-    {"4", calc_key_icon_4, 34, 454, 105, 76}, {"5", calc_key_icon_5, 153, 454, 105, 76}, {"6", calc_key_icon_6, 272, 454, 105, 76}, {"+", calc_key_icon_plus, 391, 454, 105, 76},
-    {"1", calc_key_icon_1, 34, 546, 105, 76}, {"2", calc_key_icon_2, 153, 546, 105, 76}, {"3", calc_key_icon_3, 272, 546, 105, 76}, {"=", calc_key_icon_equal, 391, 546, 105, 168},
-    {"0", calc_key_icon_0, 34, 638, 224, 76}, {".", calc_key_icon_dot, 272, 638, 105, 76},
+    {"C", calc_key_icon_c, 34, 280, 105, 76}, {"<-", calc_key_icon_delete, 153, 280, 105, 76}, {"/", calc_key_icon_solidus, 272, 280, 105, 76}, {"*", calc_key_icon_asterisk, 391, 280, 105, 76},
+    {"7", calc_key_icon_7, 34, 372, 105, 76}, {"8", calc_key_icon_8, 153, 372, 105, 76}, {"9", calc_key_icon_9, 272, 372, 105, 76}, {"-", calc_key_icon_minus, 391, 372, 105, 76},
+    {"4", calc_key_icon_4, 34, 464, 105, 76}, {"5", calc_key_icon_5, 153, 464, 105, 76}, {"6", calc_key_icon_6, 272, 464, 105, 76}, {"+", calc_key_icon_plus, 391, 464, 105, 76},
+    {"1", calc_key_icon_1, 34, 556, 105, 76}, {"2", calc_key_icon_2, 153, 556, 105, 76}, {"3", calc_key_icon_3, 272, 556, 105, 76}, {"=", calc_key_icon_equal, 391, 556, 105, 168},
+    {"0", calc_key_icon_0, 34, 648, 224, 76}, {".", calc_key_icon_dot, 272, 638, 105, 76},
 };
 
 static void drawPortraitHome();
 static void drawAnalogClockScreen();
 static void refreshClockTimeArea();
 static void refreshClockHandsArea();
+static void refreshClockInfoArea();
 static void drawCalculatorScreen();
 static void drawSettingsMenuScreen();
 static void toggleWifi();
@@ -220,6 +226,7 @@ static void refreshDisplayWhiteOnly(void (*drawFn)());
 static void refreshSdStatusArea();
 static void drawWifiScanningScreen();
 static void drawBookIcon(int32_t x, int32_t y, int32_t w, int32_t h);
+static void drawBookNavArrowIcon(int32_t x, int32_t y, bool up);
 static void refreshDisplay(void (*drawFn)());
 static void drawWifiPasswordInputBox();
 static void drawContentUrlInputBox();
@@ -231,10 +238,15 @@ static void refreshWifiStatusIconArea();
 static void refreshBookLibraryListArea();
 static void refreshBookReaderContentArea();
 static uint8_t *copyPhysicalAreaFromFramebuffer(Rect_t area);
+static bool findChangedArea(Rect_t baseArea, const uint8_t *oldBuffer, const uint8_t *newBuffer, Rect_t *changedArea);
+static bool findWhiteRecoveryArea(Rect_t baseArea, const uint8_t *oldBuffer, const uint8_t *newBuffer, Rect_t *wipeArea);
+static bool findBlackDrawArea(Rect_t baseArea, const uint8_t *oldBuffer, const uint8_t *newBuffer, Rect_t *drawArea);
 static bool fetchSelectedBook(int32_t bookId);
 static void buildBookDetailApiUrl(char *out, size_t outSize, int32_t bookId);
 static void buildContentApiUrl(char *out, size_t outSize, const char *endpoint, const char *query = NULL);
 static bool httpGetString(const char *url, String &payload, char *status, size_t statusSize, uint32_t timeoutMs = 10000);
+static bool waitForWifiReady(uint32_t timeoutMs);
+static void warmupContentServer(bool force = false);
 static bool fetchClockWeatherInfo();
 static void updateBookReaderPagination();
 static void copyJsonString(char *dest, size_t destSize, JsonObject item, const char *key, const char *fallback);
@@ -252,7 +264,9 @@ static bool touchHitsPortraitRect(int16_t tx, int16_t ty, int32_t rx, int32_t ry
 static bool handleSettingsTouch(int16_t tx, int16_t ty);
 static bool handleSettingsMenuTouch(int16_t tx, int16_t ty);
 static bool handleContentSettingsTouch(int16_t tx, int16_t ty);
-static void processTouchRelease(int16_t x, int16_t y);
+static void processTouchRelease(int16_t startX, int16_t startY, int16_t endX, int16_t endY);
+static bool handleBookSwipe(int16_t startX, int16_t startY, int16_t endX, int16_t endY);
+static bool getPortraitSwipeDelta(int16_t startX, int16_t startY, int16_t endX, int16_t endY, int32_t *dx, int32_t *dy);
 static bool touchHitsSettingsTile(int16_t tx, int16_t ty);
 static bool touchHitsBookTile(int16_t tx, int16_t ty);
 static bool touchHitsWifiStatusIcon(int16_t tx, int16_t ty);
@@ -373,6 +387,7 @@ static const int32_t SETTINGS_MENU_ITEM_W = PORTRAIT_WIDTH - 108;
 static const int32_t SETTINGS_MENU_ITEM_H = 86;
 static const int32_t SETTINGS_MENU_ITEM_GAP = 28;
 static const int32_t SETTINGS_MENU_FIRST_Y = 190;
+static const uint8_t EPD_FAST_PARTIAL_FRAMES = 4;
 
 static const char wifi_keyboard_numbers[10] = {'1', '2', '3', '4', '5', '6', '7', '8', '9', '0'};
 
@@ -818,6 +833,27 @@ static void drawBookIcon(int32_t x, int32_t y, int32_t w, int32_t h)
         int32_t yy = top + 10 + i * 9;
         portraitDrawLine(left + 9, yy, center - 9, yy + 4, 0x00);
         portraitDrawLine(center + 9, yy + 4, right - 9, yy, 0x00);
+    }
+}
+
+static void drawBookNavArrowIcon(int32_t x, int32_t y, bool up)
+{
+    // Arrow-only navigation icon for the book list.  Keep the 64x64 touch
+    // target/layout unchanged, but intentionally omit the old surrounding
+    // circle from book_nav_icons.h.
+    const int32_t cx = x + BOOK_NAV_ICON_SIZE / 2;
+    if (up) {
+        for (int32_t yy = 13; yy <= 34; ++yy) {
+            int32_t half = yy - 13;
+            portraitDrawLine(cx - half, y + yy, cx + half, y + yy, 0x00);
+        }
+        portraitFillRect(cx - 7, y + 34, 15, 18, 0x00);
+    } else {
+        portraitFillRect(cx - 7, y + 12, 15, 18, 0x00);
+        for (int32_t yy = 30; yy <= 51; ++yy) {
+            int32_t half = 51 - yy;
+            portraitDrawLine(cx - half, y + yy, cx + half, y + yy, 0x00);
+        }
     }
 }
 
@@ -2395,9 +2431,8 @@ static void drawBookLibraryScreen()
     // draw "书库" in Chinese instead of "Book Library"
     drawUtf8ChineseTextInRectSingleWidth("书库", 0, 84, PORTRAIT_WIDTH, 40);
 
-    // Draw Up and Down navigation icons next to each other
-    drawBitmapIcon1bpp(BOOK_NAV_UP_X, BOOK_NAV_UP_Y, BOOK_NAV_ICON_SIZE, BOOK_NAV_ICON_SIZE, book_nav_up_icon_64x64, 0x00);
-    drawBitmapIcon1bpp(BOOK_NAV_DOWN_X, BOOK_NAV_DOWN_Y, BOOK_NAV_ICON_SIZE, BOOK_NAV_ICON_SIZE, book_nav_down_icon_64x64, 0x00);
+    // Book-list paging is gesture-only: swipe up/left for next page,
+    // swipe down/right for previous page. No visible up/down icons.
 
     drawBookLibraryRowsArea();
 }
@@ -2574,14 +2609,13 @@ static void drawBookReaderScreen()
     drawTopStatusBar();
 
     const char *title = selected_book_title[0] != '\0' ? selected_book_title : book_reader_status;
-    drawUtf8ChineseTextLeftAlignedClipped(title, 24, 84, BOOK_NAV_UP_X - 48, 40);
+    drawUtf8ChineseTextLeftAlignedClipped(title, 24, 84, PORTRAIT_WIDTH - 48, 40);
     // Reader title only: redraw one pixel to the right to match the
     // approximately +20% stroke weight used by book content text.
-    drawUtf8ChineseTextLeftAlignedClipped(title, 24 + BOOK_READER_FONT_BOLD_PIXELS, 84, BOOK_NAV_UP_X - 48, 40);
+    drawUtf8ChineseTextLeftAlignedClipped(title, 24 + BOOK_READER_FONT_BOLD_PIXELS, 84, PORTRAIT_WIDTH - 48, 40);
 
-    // Reuse the existing book-library up/down icons for reader page navigation.
-    drawBitmapIcon1bpp(BOOK_NAV_UP_X, BOOK_NAV_UP_Y, BOOK_NAV_ICON_SIZE, BOOK_NAV_ICON_SIZE, book_nav_up_icon_64x64, 0x00);
-    drawBitmapIcon1bpp(BOOK_NAV_DOWN_X, BOOK_NAV_DOWN_Y, BOOK_NAV_ICON_SIZE, BOOK_NAV_ICON_SIZE, book_nav_down_icon_64x64, 0x00);
+    // Reader paging is gesture-only: swipe up/left for next page,
+    // swipe down/right for previous page. No visible up/down icons.
 
     char summary[32];
     snprintf(summary, sizeof(summary), "%ld/%ld", (long)(book_reader_page + 1), (long)book_reader_total_pages);
@@ -2771,9 +2805,7 @@ static void refreshChangedClockDigitalTimeCells(const char *timeLine)
         }
 
         epd_poweron();
-        epd_push_pixels(area, 60, 1);
-        epd_push_pixels(area, 60, 1);
-        epd_draw_grayscale_image(area, areaBuffer);
+        epd_draw_grayscale_image_fast(area, areaBuffer, EPD_FAST_PARTIAL_FRAMES);
         epd_poweroff();
         free(areaBuffer);
     }
@@ -3091,18 +3123,32 @@ static void refreshClockTimeArea()
     if (!areaBuffer) return;
 
     epd_poweron();
-    for (int32_t i = 0; i < 2; ++i) {
-        epd_push_pixels(area, 70, 0);
-        epd_push_pixels(area, 70, 1);
-    }
-    epd_push_pixels(area, 70, 1);
-    epd_draw_grayscale_image(area, areaBuffer);
+    epd_draw_grayscale_image_fast(area, areaBuffer, EPD_FAST_PARTIAL_FRAMES);
     epd_poweroff();
     free(areaBuffer);
 }
 
 static void refreshClockHandsArea()
 {
+    // Minute clock update is framebuffer-diff based, but intentionally limited
+    // to the clock-arm pixels.  We compare the old clock-face framebuffer with
+    // the newly rendered one, then:
+    //   - white-wipe only pixels where the old hands disappeared
+    //   - draw only pixels where the new hands appeared
+    // This avoids refreshing the whole analog face every minute.
+    const int32_t faceMargin = 20;
+    const int32_t faceX = max((int32_t)0, PORTRAIT_WIDTH / 2 - CLOCK_RADIUS - faceMargin);
+    const int32_t faceY = max((int32_t)0, CLOCK_CENTER_Y - CLOCK_RADIUS - faceMargin);
+    const int32_t faceW = min(PORTRAIT_WIDTH - faceX, CLOCK_RADIUS * 2 + faceMargin * 2);
+    const int32_t faceH = min(PORTRAIT_HEIGHT - faceY, CLOCK_RADIUS * 2 + faceMargin * 2);
+    Rect_t faceArea = portraitRectToPhysicalRect(faceX, faceY, faceW, faceH);
+
+    uint8_t *oldFaceBuffer = copyPhysicalAreaFromFramebuffer(faceArea);
+    if (!oldFaceBuffer) {
+        if (oldFaceBuffer) free(oldFaceBuffer);
+        return;
+    }
+
     time_t now = time(NULL);
     struct tm timeinfo;
     if (now < 100000 || !localtime_r(&now, &timeinfo)) {
@@ -3112,63 +3158,131 @@ static void refreshClockHandsArea()
         timeinfo.tm_sec = 0;
     }
 
-    const int32_t cx = PORTRAIT_WIDTH / 2;
-    const int32_t cy = CLOCK_CENTER_Y;
-    int32_t newHourX = 0;
-    int32_t newHourY = 0;
-    int32_t newMinuteX = 0;
-    int32_t newMinuteY = 0;
-    calculateClockHandEndpoints(timeinfo, &newHourX, &newHourY, &newMinuteX, &newMinuteY);
-    char timeLine[16];
-    snprintf(timeLine, sizeof(timeLine), "%02d:%02d", timeinfo.tm_hour, timeinfo.tm_min);
-
-    if (!clock_hands_initialized) {
-        last_clock_hour_x = newHourX;
-        last_clock_hour_y = newHourY;
-        last_clock_minute_x = newMinuteX;
-        last_clock_minute_y = newMinuteY;
-        clock_hands_initialized = true;
-    }
-
-    const int32_t margin = 18;
-    int32_t left = min(min(min(last_clock_hour_x, last_clock_minute_x), min(newHourX, newMinuteX)), cx) - margin;
-    int32_t top = min(min(min(last_clock_hour_y, last_clock_minute_y), min(newHourY, newMinuteY)), cy) - margin;
-    int32_t right = max(max(max(last_clock_hour_x, last_clock_minute_x), max(newHourX, newMinuteX)), cx) + margin;
-    int32_t bottom = max(max(max(last_clock_hour_y, last_clock_minute_y), max(newHourY, newMinuteY)), cy) + margin;
-
-    left = max((int32_t)0, left);
-    top = max((int32_t)0, top);
-    right = min(PORTRAIT_WIDTH, right);
-    bottom = min(PORTRAIT_HEIGHT, bottom);
-    int32_t refreshW = right - left;
-    int32_t refreshH = bottom - top;
-    if (refreshW <= 0 || refreshH <= 0) {
-        return;
-    }
-
-    // Only clear/redraw the small union bounds covering old + new hands.
-    portraitFillRect(left, top, refreshW, refreshH, 0xFF);
+    // Rebuild only the analog face in the framebuffer.  This creates the new
+    // reference image for comparison while preserving all non-clock-page state.
+    portraitFillRect(faceX, faceY, faceW, faceH, 0xFF);
     redrawClockFaceDetails();
     drawClockHands(timeinfo);
 
-    Rect_t area = portraitRectToPhysicalRect(left, top, refreshW, refreshH);
-    uint8_t *areaBuffer = copyPhysicalAreaFromFramebuffer(area);
-    if (!areaBuffer) return;
+    uint8_t *newFaceBuffer = copyPhysicalAreaFromFramebuffer(faceArea);
+    if (!newFaceBuffer) {
+        free(oldFaceBuffer);
+        if (newFaceBuffer) free(newFaceBuffer);
+        return;
+    }
+
+    Rect_t wipeOldArmArea;
+    Rect_t drawNewArmArea;
+    bool wipeOldArm = findWhiteRecoveryArea(faceArea, oldFaceBuffer, newFaceBuffer, &wipeOldArmArea);
+    bool drawNewArm = findBlackDrawArea(faceArea, oldFaceBuffer, newFaceBuffer, &drawNewArmArea);
+
+    char timeLine[16];
+    snprintf(timeLine, sizeof(timeLine), "%02d:%02d", timeinfo.tm_hour, timeinfo.tm_min);
 
     epd_poweron();
-    // Condition only the small hand update rectangle before drawing the new
-    // hand image. Three black/white pulses reduce ghosting from the old hands
-    // while still avoiding a full clock/screen refresh.
-    for (int32_t i = 0; i < 3; ++i) {
-        epd_push_pixels(area, 70, 0);
-        epd_push_pixels(area, 70, 1);
+    if (wipeOldArm) {
+        // Strong white pulses erase only the old arm pixels that are no longer
+        // black in the framebuffer; the static dial is left untouched.
+        epd_push_pixels(wipeOldArmArea, 50, 1);
+        epd_push_pixels(wipeOldArmArea, 50, 1);
     }
-    epd_push_pixels(area, 70, 1);
-    epd_draw_grayscale_image(area, areaBuffer);
-    epd_poweroff();
-    free(areaBuffer);
+    if (drawNewArm) {
+        uint8_t *newArmBuffer = copyPhysicalAreaFromFramebuffer(drawNewArmArea);
+        if (newArmBuffer) {
+            epd_draw_grayscale_image_fast(drawNewArmArea, newArmBuffer, EPD_FAST_PARTIAL_FRAMES);
+            free(newArmBuffer);
+        }
+    }
 
-    refreshChangedClockDigitalTimeCells(timeLine);
+    // Keep the digital time synchronized, but update only changed digit cells.
+    for (int32_t i = 0; i < CLOCK_DIGITAL_CELL_COUNT; ++i) {
+        if (last_clock_time_line[i] == timeLine[i]) {
+            continue;
+        }
+
+        const int32_t margin = 4;
+        const int32_t x = clockDigitalCellX(i) - margin;
+        const int32_t y = CLOCK_TIME_Y - margin;
+        const int32_t w = CLOCK_DIGITAL_CELL_W[i] + margin * 2;
+        const int32_t h = CLOCK_DIGITAL_CELL_H + margin * 2;
+
+        portraitFillRect(x, y, w, h, 0xFF);
+        drawClockDigitalTimeCell(timeLine[i], i);
+
+        Rect_t cellArea = portraitRectToPhysicalRect(x, y, w, h);
+        uint8_t *cellBuffer = copyPhysicalAreaFromFramebuffer(cellArea);
+        if (cellBuffer) {
+            epd_push_pixels(cellArea, 45, 1);
+            epd_draw_grayscale_image_fast(cellArea, cellBuffer, EPD_FAST_PARTIAL_FRAMES);
+            free(cellBuffer);
+        }
+    }
+    epd_poweroff();
+
+    snprintf(last_clock_time_line, sizeof(last_clock_time_line), "%s", timeLine);
+
+    free(oldFaceBuffer);
+    free(newFaceBuffer);
+}
+
+static void refreshClockInfoArea()
+{
+    // After the clock page is already visible, update only the lower
+    // location/weather section with the API result.  This keeps the Home ->
+    // Clock transition fast because the slow HTTP calls no longer block the
+    // initial analog-clock render.
+    const int32_t infoY = CLOCK_LOC_TITLE_Y - 18;
+    const int32_t infoH = PORTRAIT_HEIGHT - infoY - 10;
+
+    portraitFillRect(0, infoY, PORTRAIT_WIDTH, infoH, 0xFF);
+
+    portraitDrawLine(34, CLOCK_LOC_TITLE_Y - 8, PORTRAIT_WIDTH - 34, CLOCK_LOC_TITLE_Y - 8, 0x00);
+    const char *cityZh = translateCityZh(clock_weather.city[0] != '\0' ? clock_weather.city : "Shenzhen");
+    drawUtf8ChineseTextInRectSingleWidth(cityZh, 34, CLOCK_LOC_TITLE_Y + 14, PORTRAIT_WIDTH - 68, 46);
+
+    portraitDrawLine(34, CLOCK_WEATHER_TITLE_Y - 8, PORTRAIT_WIDTH - 34, CLOCK_WEATHER_TITLE_Y - 8, 0x00);
+
+    const int32_t weatherBoxY = CLOCK_WEATHER_TITLE_Y + 16;
+    const int32_t weatherBoxH = 220;
+    portraitDrawRect(34, weatherBoxY, PORTRAIT_WIDTH - 68, weatherBoxH, 0x00);
+    portraitDrawRect(38, weatherBoxY + 4, PORTRAIT_WIDTH - 76, weatherBoxH - 8, 0x00);
+
+    if (clock_weather.loaded) {
+        const char *descZh = translateWeatherDescZh(clock_weather.desc);
+
+        char tempBuf[16];
+        snprintf(tempBuf, sizeof(tempBuf), "%s", clock_weather.temp[0] ? clock_weather.temp : "--");
+        drawPortraitTextInRectCenteredScaled(tempBuf, 52, weatherBoxY + 14, 82, 54, (GFXfont *)&FiraSans, 0.75f);
+        drawUtf8ChineseTextInRectSingleWidthScaled("度", 128, weatherBoxY + 14, 50, 54, 1.0f);
+        drawUtf8ChineseTextInRectSingleWidth(descZh, 174, weatherBoxY + 20, 170, 40);
+
+        drawUtf8ChineseTextInRectSingleWidthScaled("湿度", 50, weatherBoxY + 78, 116, 46, 1.0f);
+        drawPortraitTextInRectCenteredScaled(clock_weather.humidity[0] ? clock_weather.humidity : "--", 184, weatherBoxY + 74, 86, 50, (GFXfont *)&FiraSans, 0.75f);
+        drawPortraitTextInRectCenteredScaled("%", 260, weatherBoxY + 74, 42, 50, (GFXfont *)&FiraSans, 0.75f);
+
+        drawUtf8ChineseTextInRectSingleWidthScaled("风速", 50, weatherBoxY + 132, 116, 46, 1.0f);
+        drawPortraitTextInRectCenteredScaled(clock_weather.wind[0] ? clock_weather.wind : "--", 184, weatherBoxY + 128, 86, 50, (GFXfont *)&FiraSans, 0.75f);
+        drawUtf8ChineseTextInRectSingleWidthScaled("千米每时", 276, weatherBoxY + 132, 180, 46, 1.0f);
+    } else {
+        drawUtf8ChineseTextInRectSingleWidth(clock_weather.status, 48, weatherBoxY + 50, PORTRAIT_WIDTH - 96, 60);
+    }
+
+    Rect_t infoArea = portraitRectToPhysicalRect(0, infoY, PORTRAIT_WIDTH, infoH);
+    uint8_t *infoBuffer = copyPhysicalAreaFromFramebuffer(infoArea);
+    if (!infoBuffer) {
+        return;
+    }
+
+    epd_poweron();
+    // The weather/location band can contain dense old Chinese text and box
+    // borders.  Use three white pulses before drawing the API result so stale
+    // city/weather pixels are fully cleared on the e-paper panel.
+    for (int i = 0; i < 3; ++i) {
+        epd_push_pixels(infoArea, 50, 1);
+    }
+    epd_draw_grayscale_image_fast(infoArea, infoBuffer, EPD_FAST_PARTIAL_FRAMES);
+    epd_poweroff();
+    free(infoBuffer);
 }
 
 static void drawCalculatorScreen()
@@ -3219,6 +3333,143 @@ static void setPackedPixel(uint8_t *buffer, int32_t width, int32_t x, int32_t y,
     } else {
         *packed = (*packed & 0xF0) | (color & 0x0F);
     }
+}
+
+static uint8_t packedBufferPixel(const uint8_t *buffer, int32_t width, int32_t x, int32_t y)
+{
+    int32_t stride = width / 2 + width % 2;
+    uint8_t packed = buffer[y * stride + x / 2];
+    return (x & 1) ? (packed >> 4) : (packed & 0x0F);
+}
+
+static bool findWhiteRecoveryArea(Rect_t baseArea, const uint8_t *oldBuffer, const uint8_t *newBuffer, Rect_t *wipeArea)
+{
+    if (!oldBuffer || !newBuffer || !wipeArea || baseArea.width <= 0 || baseArea.height <= 0) {
+        return false;
+    }
+
+    int32_t minX = baseArea.width;
+    int32_t minY = baseArea.height;
+    int32_t maxX = -1;
+    int32_t maxY = -1;
+
+    for (int32_t y = 0; y < baseArea.height; ++y) {
+        for (int32_t x = 0; x < baseArea.width; ++x) {
+            const uint8_t oldPx = packedBufferPixel(oldBuffer, baseArea.width, x, y);
+            const uint8_t newPx = packedBufferPixel(newBuffer, baseArea.width, x, y);
+
+            // Fast partial drawing is weak at turning old black pixels fully white.
+            // Detect pixels that belonged to the previous screen but are blank in
+            // the new screen, then wipe just their bounding rectangle before draw.
+            if (oldPx <= 2 && newPx >= 14) {
+                if (x < minX) minX = x;
+                if (y < minY) minY = y;
+                if (x > maxX) maxX = x;
+                if (y > maxY) maxY = y;
+            }
+        }
+    }
+
+    if (maxX < minX || maxY < minY) {
+        return false;
+    }
+
+    const int32_t margin = 8;
+    minX = max((int32_t)0, minX - margin);
+    minY = max((int32_t)0, minY - margin);
+    maxX = min(baseArea.width - 1, maxX + margin);
+    maxY = min(baseArea.height - 1, maxY + margin);
+
+    wipeArea->x = baseArea.x + minX;
+    wipeArea->y = baseArea.y + minY;
+    wipeArea->width = maxX - minX + 1;
+    wipeArea->height = maxY - minY + 1;
+    return true;
+}
+
+static bool findBlackDrawArea(Rect_t baseArea, const uint8_t *oldBuffer, const uint8_t *newBuffer, Rect_t *drawArea)
+{
+    if (!oldBuffer || !newBuffer || !drawArea || baseArea.width <= 0 || baseArea.height <= 0) {
+        return false;
+    }
+
+    int32_t minX = baseArea.width;
+    int32_t minY = baseArea.height;
+    int32_t maxX = -1;
+    int32_t maxY = -1;
+
+    for (int32_t y = 0; y < baseArea.height; ++y) {
+        for (int32_t x = 0; x < baseArea.width; ++x) {
+            const uint8_t oldPx = packedBufferPixel(oldBuffer, baseArea.width, x, y);
+            const uint8_t newPx = packedBufferPixel(newBuffer, baseArea.width, x, y);
+
+            // Pixels that were white/empty before but are black in the new
+            // framebuffer are the newly moved clock-arm pixels to draw.
+            if (oldPx >= 14 && newPx <= 2) {
+                if (x < minX) minX = x;
+                if (y < minY) minY = y;
+                if (x > maxX) maxX = x;
+                if (y > maxY) maxY = y;
+            }
+        }
+    }
+
+    if (maxX < minX || maxY < minY) {
+        return false;
+    }
+
+    const int32_t margin = 8;
+    minX = max((int32_t)0, minX - margin);
+    minY = max((int32_t)0, minY - margin);
+    maxX = min(baseArea.width - 1, maxX + margin);
+    maxY = min(baseArea.height - 1, maxY + margin);
+
+    drawArea->x = baseArea.x + minX;
+    drawArea->y = baseArea.y + minY;
+    drawArea->width = maxX - minX + 1;
+    drawArea->height = maxY - minY + 1;
+    return true;
+}
+
+static bool findChangedArea(Rect_t baseArea, const uint8_t *oldBuffer, const uint8_t *newBuffer, Rect_t *changedArea)
+{
+    if (!oldBuffer || !newBuffer || !changedArea || baseArea.width <= 0 || baseArea.height <= 0) {
+        return false;
+    }
+
+    int32_t minX = baseArea.width;
+    int32_t minY = baseArea.height;
+    int32_t maxX = -1;
+    int32_t maxY = -1;
+
+    for (int32_t y = 0; y < baseArea.height; ++y) {
+        for (int32_t x = 0; x < baseArea.width; ++x) {
+            const uint8_t oldPx = packedBufferPixel(oldBuffer, baseArea.width, x, y);
+            const uint8_t newPx = packedBufferPixel(newBuffer, baseArea.width, x, y);
+            if (oldPx != newPx) {
+                if (x < minX) minX = x;
+                if (y < minY) minY = y;
+                if (x > maxX) maxX = x;
+                if (y > maxY) maxY = y;
+            }
+        }
+    }
+
+    if (maxX < minX || maxY < minY) {
+        return false;
+    }
+
+    const int32_t margin = 6;
+    minX = max((int32_t)0, minX - margin);
+    minY = max((int32_t)0, minY - margin);
+    maxX = min(baseArea.width - 1, maxX + margin);
+    maxY = min(baseArea.height - 1, maxY + margin);
+
+    changedArea->x = baseArea.x + minX;
+    changedArea->y = baseArea.y + minY;
+    changedArea->width = maxX - minX + 1;
+    changedArea->height = maxY - minY + 1;
+    return true;
 }
 
 static uint8_t *copyPhysicalAreaFromFramebuffer(Rect_t area)
@@ -3297,8 +3548,11 @@ static void refreshCalculatorResultArea(const char *previousExpression)
 
     // Any calculator update redraws the whole result/digit area.  This is a
     // little larger than the old text-bounds-only refresh, but it guarantees
-    // every changed value/operator/backspace result is visibly refreshed and
-    // prevents stale digit remnants on the e-paper panel.
+    // every changed value/operator/backspace result is visibly refreshed.
+    // Calculator typing changes this dense area repeatedly, so first drive the
+    // old result pixels white to remove ghosting, then use the normal grayscale
+    // waveform instead of the fast partial waveform to make new black digits
+    // and operators darker/crisper.
     const int32_t margin = CALC_DIGITS_REFRESH_MARGIN;
     int32_t refreshX = CALC_DIGITS_X - margin;
     int32_t refreshY = CALC_DIGITS_Y - margin;
@@ -3308,12 +3562,6 @@ static void refreshCalculatorResultArea(const char *previousExpression)
     Rect_t area = portraitRectToPhysicalRect(refreshX, refreshY, refreshW, refreshH);
 
     epd_poweron();
-    // First wipe the physical result area to pure white. This happens before
-    // drawing/copying the new result so number/operator updates do not blend
-    // with stale pixels from the previous calculator display value.
-    epd_push_pixels(area, 80, 1);
-    epd_push_pixels(area, 80, 1);
-
     drawCalculatorResultArea();
     uint8_t *areaBuffer = copyPhysicalAreaFromFramebuffer(area);
     if (!areaBuffer) {
@@ -3321,7 +3569,8 @@ static void refreshCalculatorResultArea(const char *previousExpression)
         return;
     }
 
-    // Now write the updated result framebuffer into the already-cleared area.
+    epd_push_pixels(area, 60, 1);
+    epd_push_pixels(area, 60, 1);
     epd_draw_grayscale_image(area, areaBuffer);
     epd_poweroff();
     free(areaBuffer);
@@ -3513,31 +3762,47 @@ static bool handleCalculatorTouchLegacy(int16_t tx, int16_t ty)
     return false;
 }
 
-static void refreshDisplayExtended(void (*drawFn)(), bool use_black_refresh)
+static void refreshDisplayExtended(void (*drawFn)(), bool use_black_refresh, int32_t refreshTime = 60)
 {
     epd_poweron();
 
-    // Keep the top status bar untouched during refresh. Only wipe and redraw the
-    // content area below it, first black and then white, to reduce ghosting
-    // without blinking the top bar.
+    // Keep the top status bar untouched during refresh. Normal navigation uses
+    // a fast partial-style update: draw the new image directly without the old
+    // black/white compensation flashes. The periodic anti-ghost refresh still
+    // uses a short black/white wipe by passing use_black_refresh=true.
     Rect_t contentArea = portraitRectToPhysicalRect(0, TOP_STATUS_BAR_H, PORTRAIT_WIDTH, PORTRAIT_HEIGHT - TOP_STATUS_BAR_H);
-    const int32_t refreshTime = use_black_refresh ? 60 : 120;
-    const int32_t wipeCycles = use_black_refresh ? 1 : 2;
-    for (int32_t i = 0; i < wipeCycles; ++i) {
+    uint8_t *oldContentBuffer = use_black_refresh ? NULL : copyPhysicalAreaFromFramebuffer(contentArea);
+    if (use_black_refresh) {
         epd_push_pixels(contentArea, refreshTime, 0); // Black wipe below top bar
         epd_push_pixels(contentArea, refreshTime, 1); // White wipe below top bar
+        epd_push_pixels(contentArea, refreshTime, 1); // Extra white pulse
     }
-    // Finish with extra white pulses so the content area is clean before the
-    // next framebuffer image is drawn.
-    epd_push_pixels(contentArea, refreshTime, 1);
 
     // Redraw the framebuffer, then update only the content area below the top bar.
     drawFn();
 
     uint8_t *contentBuffer = copyPhysicalAreaFromFramebuffer(contentArea);
     if (contentBuffer) {
-        epd_draw_grayscale_image(contentArea, contentBuffer);
+        if (use_black_refresh) {
+            epd_draw_grayscale_image(contentArea, contentBuffer);
+        } else {
+            Rect_t whiteRecoveryArea;
+            if (findWhiteRecoveryArea(contentArea, oldContentBuffer, contentBuffer, &whiteRecoveryArea)) {
+                epd_push_pixels(whiteRecoveryArea, 50, 1);
+                epd_push_pixels(whiteRecoveryArea, 50, 1);
+            }
+            // Full-screen navigation changes need stronger black than the fast
+            // partial waveform can provide.  Keep the compare-based white wipe
+            // above to remove unrelated previous-screen pixels, then draw the
+            // new content with the normal grayscale waveform so Clock/Home
+            // outlines and icons render dark and crisp.
+            epd_draw_grayscale_image(contentArea, contentBuffer);
+        }
         free(contentBuffer);
+    }
+
+    if (oldContentBuffer) {
+        free(oldContentBuffer);
     }
 
     epd_poweroff();
@@ -3596,16 +3861,17 @@ static void refreshBookLibraryListArea()
     }
 
     epd_poweron();
-    epd_push_pixels(counterArea, 60, 1);
-    epd_push_pixels(counterArea, 60, 1);
+    // Page swipes replace dense row text/boxes in the same lower content
+    // band.  White-wipe the counter and content areas before drawing the next
+    // page so old book-list rows/counter digits do not ghost into the new page.
+    epd_push_pixels(counterArea, 55, 1);
+    epd_push_pixels(counterArea, 55, 1);
+    epd_push_pixels(counterArea, 55, 1);
+    epd_push_pixels(listArea, 55, 1);
+    epd_push_pixels(listArea, 55, 1);
+    epd_push_pixels(listArea, 55, 1);
     epd_draw_grayscale_image(counterArea, counterBuffer);
-
-    for (int32_t i = 0; i < 2; ++i) {
-        epd_push_pixels(listArea, 70, 0);
-        epd_push_pixels(listArea, 70, 1);
-    }
-    epd_push_pixels(listArea, 70, 1);
-    epd_draw_grayscale_image(listArea, listBuffer);
+    epd_draw_grayscale_image_fast(listArea, listBuffer, EPD_FAST_PARTIAL_FRAMES);
     epd_poweroff();
 
     free(counterBuffer);
@@ -3635,7 +3901,7 @@ static void refreshBookSaveIconArea(int bookIndex)
     }
 
     epd_poweron();
-    epd_draw_grayscale_image(iconArea, iconBuffer);
+    epd_draw_grayscale_image_fast(iconArea, iconBuffer, EPD_FAST_PARTIAL_FRAMES);
     epd_poweroff();
 
     free(iconBuffer);
@@ -3646,22 +3912,37 @@ static void refreshBookReaderContentArea()
     updateBookReaderPagination();
     drawBookReaderScreen();
 
+    Rect_t counterArea = portraitRectToPhysicalRect(54, 126, PORTRAIT_WIDTH - 108, 38);
+    uint8_t *counterBuffer = copyPhysicalAreaFromFramebuffer(counterArea);
+
     const int32_t readerRefreshH = PORTRAIT_HEIGHT - BOOK_READER_CONTENT_Y - BOOK_LIST_REFRESH_BOTTOM_MARGIN;
     Rect_t readerArea = portraitRectToPhysicalRect(0, BOOK_READER_CONTENT_Y, PORTRAIT_WIDTH, readerRefreshH);
     uint8_t *readerBuffer = copyPhysicalAreaFromFramebuffer(readerArea);
-    if (!readerBuffer) {
+    if (!counterBuffer || !readerBuffer) {
+        if (counterBuffer) free(counterBuffer);
+        if (readerBuffer) free(readerBuffer);
         return;
     }
 
     epd_poweron();
-    for (int32_t i = 0; i < 2; ++i) {
-        epd_push_pixels(readerArea, 70, 0);
-        epd_push_pixels(readerArea, 70, 1);
-    }
-    epd_push_pixels(readerArea, 70, 1);
+    // Reader page swipes replace dense Chinese text in the same content band.
+    // White-wipe the page counter and reader content area before drawing the
+    // next page, keeping the top status/title area stable while clearing old
+    // counter/text ghosts.
+    epd_push_pixels(counterArea, 55, 1);
+    epd_push_pixels(counterArea, 55, 1);
+    epd_push_pixels(counterArea, 55, 1);
+    epd_push_pixels(readerArea, 55, 1);
+    epd_push_pixels(readerArea, 55, 1);
+    epd_push_pixels(readerArea, 55, 1);
+    epd_draw_grayscale_image(counterArea, counterBuffer);
+    // After a white wipe, the fast partial waveform can leave newly drawn
+    // reader text faint. Use the normal grayscale waveform for this partial
+    // content band so the new page's black Chinese glyphs are darker/crisper.
     epd_draw_grayscale_image(readerArea, readerBuffer);
     epd_poweroff();
 
+    free(counterBuffer);
     free(readerBuffer);
 }
 
@@ -3683,16 +3964,7 @@ static void refreshWifiPasswordArea()
     }
 
     epd_poweron();
-    // Partial e-paper updates can retain faint remnants of previous text
-    // (especially the long "Enter Password..." placeholder). Use a small
-    // black/white conditioning cycle, confined to the password box, before
-    // drawing the updated framebuffer region.
-    for (int32_t i = 0; i < 2; ++i) {
-        epd_push_pixels(passwordArea, 60, 0); // Black wipe only the password box area
-        epd_push_pixels(passwordArea, 60, 1); // White wipe only the password box area
-    }
-    epd_push_pixels(passwordArea, 60, 1); // Extra white pulse to clear residue
-    epd_draw_grayscale_image(passwordArea, passwordBuffer);
+    epd_draw_grayscale_image_fast(passwordArea, passwordBuffer, EPD_FAST_PARTIAL_FRAMES);
     epd_poweroff();
 
     free(passwordBuffer);
@@ -3713,12 +3985,7 @@ static void refreshContentUrlArea()
     }
 
     epd_poweron();
-    for (int32_t i = 0; i < 2; ++i) {
-        epd_push_pixels(urlArea, 60, 0);
-        epd_push_pixels(urlArea, 60, 1);
-    }
-    epd_push_pixels(urlArea, 60, 1);
-    epd_draw_grayscale_image(urlArea, urlBuffer);
+    epd_draw_grayscale_image_fast(urlArea, urlBuffer, EPD_FAST_PARTIAL_FRAMES);
     epd_poweroff();
 
     free(urlBuffer);
@@ -3745,12 +4012,7 @@ static void refreshWifiKeyboardArea()
     }
 
     epd_poweron();
-    for (int32_t i = 0; i < 3; ++i) {
-        epd_push_pixels(keyboardArea, 80, 0); // Black wipe only over keyboard
-        epd_push_pixels(keyboardArea, 80, 1); // White wipe only over keyboard
-    }
-    epd_push_pixels(keyboardArea, 80, 1); // Extra white pulse to clear residue
-    epd_draw_grayscale_image(keyboardArea, keyboardBuffer);
+    epd_draw_grayscale_image_fast(keyboardArea, keyboardBuffer, EPD_FAST_PARTIAL_FRAMES);
     epd_poweroff();
 
     free(keyboardBuffer);
@@ -3774,12 +4036,7 @@ static void refreshContentKeyboardArea()
     }
 
     epd_poweron();
-    for (int32_t i = 0; i < 3; ++i) {
-        epd_push_pixels(keyboardArea, 80, 0);
-        epd_push_pixels(keyboardArea, 80, 1);
-    }
-    epd_push_pixels(keyboardArea, 80, 1);
-    epd_draw_grayscale_image(keyboardArea, keyboardBuffer);
+    epd_draw_grayscale_image_fast(keyboardArea, keyboardBuffer, EPD_FAST_PARTIAL_FRAMES);
     epd_poweroff();
 
     free(keyboardBuffer);
@@ -3798,12 +4055,7 @@ static void refreshWifiStatusIconArea()
     }
 
     epd_poweron();
-    // Explicitly wipe the old WiFi icon before drawing the updated connected /
-    // disconnected icon. Multiple white pulses help remove e-paper remnants.
-    for (int32_t i = 0; i < 3; ++i) {
-        epd_push_pixels(wifiIconArea, 70, 1); // Clear only the WiFi icon region
-    }
-    epd_draw_grayscale_image(wifiIconArea, wifiIconBuffer);
+    epd_draw_grayscale_image_fast(wifiIconArea, wifiIconBuffer, EPD_FAST_PARTIAL_FRAMES);
     epd_poweroff();
 
     free(wifiIconBuffer);
@@ -3878,6 +4130,91 @@ static bool touchHitsWifiStatusIcon(int16_t tx, int16_t ty)
     return touchHitsPortraitRect(tx, ty, PORTRAIT_WIDTH - 150, 0, 70, 56);
 }
 
+static bool getPortraitSwipeDelta(int16_t startX, int16_t startY, int16_t endX, int16_t endY, int32_t *dx, int32_t *dy)
+{
+    if (!dx || !dy) {
+        return false;
+    }
+
+    int32_t sx = 0, sy = 0, ex = 0, ey = 0;
+    if (portraitPointFromTouch(startX, startY, &sx, &sy, true) && portraitPointFromTouch(endX, endY, &ex, &ey, true)) {
+        *dx = ex - sx;
+        *dy = ey - sy;
+        return true;
+    }
+    if (portraitPointFromTouch(startX, startY, &sx, &sy, false) && portraitPointFromTouch(endX, endY, &ex, &ey, false)) {
+        *dx = ex - sx;
+        *dy = ey - sy;
+        return true;
+    }
+    return false;
+}
+
+static bool handleBookSwipe(int16_t startX, int16_t startY, int16_t endX, int16_t endY)
+{
+    int32_t dx = 0;
+    int32_t dy = 0;
+    if (!getPortraitSwipeDelta(startX, startY, endX, endY, &dx, &dy)) {
+        return false;
+    }
+
+    const int32_t SWIPE_THRESHOLD = 70;
+    if (abs(dx) < SWIPE_THRESHOLD && abs(dy) < SWIPE_THRESHOLD) {
+        return false;
+    }
+
+    const bool nextPage = (abs(dx) >= abs(dy)) ? (dx < 0) : (dy < 0);  // left/up
+
+    if (showingBookLibrary) {
+        if (nextPage) {
+            if (book_current_page * MAX_BOOK_ITEMS < book_total) {
+                int32_t previousPage = book_current_page;
+                book_current_page++;
+                if (!fetchBookLibrary()) {
+                    book_current_page = previousPage;
+                } else {
+                    refreshBookLibraryListArea();
+                }
+            }
+        } else {
+            if (book_current_page > 1) {
+                int32_t previousPage = book_current_page;
+                book_current_page--;
+                if (!fetchBookLibrary()) {
+                    book_current_page = previousPage;
+                } else {
+                    refreshBookLibraryListArea();
+                }
+            }
+        }
+        return true;
+    }
+
+    if (showingBookReader) {
+        if (nextPage) {
+            if (book_reader_page + 1 < book_reader_total_pages) {
+                book_reader_page++;
+                refreshBookReaderContentArea();
+            }
+        } else {
+            if (book_reader_page > 0) {
+                book_reader_page--;
+                refreshBookReaderContentArea();
+            } else {
+                showingBookReader = false;
+                showingBookLibrary = true;
+                // Switching from book content back to the library changes a
+                // dense text page into row boxes. Use a compensated refresh so
+                // old reader text is wiped before the book list is drawn.
+                refreshDisplayExtended(drawBookLibraryScreen, true, 90);
+            }
+        }
+        return true;
+    }
+
+    return false;
+}
+
 struct _point {
     uint8_t buttonID;
     int32_t x;
@@ -3892,8 +4229,10 @@ struct _point {
     {4, EPD_WIDTH / 2 - 60, EPD_HEIGHT - 80, 120, 80}
 };
 
-static void processTouchRelease(int16_t x, int16_t y)
+static void processTouchRelease(int16_t startX, int16_t startY, int16_t endX, int16_t endY)
 {
+    const int16_t x = startX;
+    const int16_t y = startY;
     if ((showingClock || showingCalculator || showingSettings || showingSettingsMenu || showingContentSettings || showingBookLibrary || showingBookReader || showingSdMenu || showingSdFolder) && touchHitsHomeStatusIcon(x, y)) {
         showingClock = false;
         showingCalculator = false;
@@ -3905,7 +4244,11 @@ static void processTouchRelease(int16_t x, int16_t y)
         showingSdMenu = false;
         showingSdFolder = false;
         show_password_prompt = false;
-        refreshDisplay(drawPortraitHome);
+        // Returning to Home from another full-screen app can leave visible
+        // ghosting, especially after the dense Clock screen.  Use one
+        // compensated refresh with double-length black/white pulses instead
+        // of two separate refreshes, so it clears strongly but returns faster.
+        refreshDisplayExtended(drawPortraitHome, true, 120);
         touch_loop_interval = millis() + 300;
         return;
     }
@@ -3926,31 +4269,7 @@ static void processTouchRelease(int16_t x, int16_t y)
     }
 
     if (showingBookLibrary) {
-        // Check Up navigation button
-        if (touchHitsPortraitRect(x, y, BOOK_NAV_UP_X, BOOK_NAV_UP_Y, BOOK_NAV_ICON_SIZE, BOOK_NAV_ICON_SIZE)) {
-            if (book_current_page > 1) {
-                int32_t previousPage = book_current_page;
-                book_current_page--;
-                if (!fetchBookLibrary()) {
-                    book_current_page = previousPage;
-                } else {
-                    refreshBookLibraryListArea();
-                }
-            }
-            touch_loop_interval = millis() + 300;
-            return;
-        }
-        // Check Down navigation button
-        if (touchHitsPortraitRect(x, y, BOOK_NAV_DOWN_X, BOOK_NAV_DOWN_Y, BOOK_NAV_ICON_SIZE, BOOK_NAV_ICON_SIZE)) {
-            if (book_current_page * MAX_BOOK_ITEMS < book_total) {
-                int32_t previousPage = book_current_page;
-                book_current_page++;
-                if (!fetchBookLibrary()) {
-                    book_current_page = previousPage;
-                } else {
-                    refreshBookLibraryListArea();
-                }
-            }
+        if (handleBookSwipe(startX, startY, endX, endY)) {
             touch_loop_interval = millis() + 300;
             return;
         }
@@ -3990,14 +4309,20 @@ static void processTouchRelease(int16_t x, int16_t y)
                     book_reader_total_pages = 1;
                     snprintf(book_reader_status, sizeof(book_reader_status), "Loading book...");
 
-                    refreshDisplay(drawBookReaderScreen);
+                    // First switch from the dense book-list rows to the reader
+                    // loading page with a real refresh, otherwise row/title
+                    // remnants can stay visible while the book is fetched.
+                    refreshDisplayExtended(drawBookReaderScreen, true, 90);
                     if (!fetchSelectedBook(selected_book_id)) {
                         selected_book_content = "";
                     }
                 }
                 showingBookLibrary = false;
                 showingBookReader = true;
-                refreshDisplay(drawBookReaderScreen);
+                // Final switch to the loaded reader content also uses a
+                // compensated refresh so the loading/list pixels are cleared
+                // and the reader text is written with stronger black.
+                refreshDisplayExtended(drawBookReaderScreen, true, 90);
                 queueSelectedBookAutoSave();
                 touch_loop_interval = millis() + 300;
                 return;
@@ -4006,23 +4331,7 @@ static void processTouchRelease(int16_t x, int16_t y)
     }
 
     if (showingBookReader) {
-        if (touchHitsPortraitRect(x, y, BOOK_NAV_UP_X, BOOK_NAV_UP_Y, BOOK_NAV_ICON_SIZE, BOOK_NAV_ICON_SIZE)) {
-            if (book_reader_page > 0) {
-                book_reader_page--;
-                refreshBookReaderContentArea();
-            } else {
-                showingBookReader = false;
-                showingBookLibrary = true;
-                refreshDisplay(drawBookLibraryScreen);
-            }
-            touch_loop_interval = millis() + 300;
-            return;
-        }
-        if (touchHitsPortraitRect(x, y, BOOK_NAV_DOWN_X, BOOK_NAV_DOWN_Y, BOOK_NAV_ICON_SIZE, BOOK_NAV_ICON_SIZE)) {
-            if (book_reader_page + 1 < book_reader_total_pages) {
-                book_reader_page++;
-                refreshBookReaderContentArea();
-            }
+        if (handleBookSwipe(startX, startY, endX, endY)) {
             touch_loop_interval = millis() + 300;
             return;
         }
@@ -4085,7 +4394,9 @@ static void processTouchRelease(int16_t x, int16_t y)
 
     if (!showingClock && !showingCalculator && !showingSettings && !showingSettingsMenu && !showingContentSettings && !showingBookLibrary && !showingBookReader && !showingSdMenu && !showingSdFolder && touchHitsClockTile(x, y)) {
         showingClock = true;
-        fetchClockWeatherInfo();
+        clock_weather.loaded = false;
+        snprintf(clock_weather.city, sizeof(clock_weather.city), "Shenzhen");
+        snprintf(clock_weather.status, sizeof(clock_weather.status), "Syncing clock/weather...");
         refreshDisplay(drawAnalogClockScreen);
         time_t now = time(NULL);
         struct tm timeinfo;
@@ -4093,6 +4404,11 @@ static void processTouchRelease(int16_t x, int16_t y)
             clock_refresh_interval = millis() + millisUntilNextMinute(timeinfo);
         } else {
             clock_refresh_interval = millis() + 60000;
+        }
+        if (fetchClockWeatherInfo() && showingClock) {
+            refreshClockInfoArea();
+        } else if (showingClock) {
+            refreshClockInfoArea();
         }
         touch_loop_interval = millis() + 300;
         return;
@@ -4179,6 +4495,8 @@ void WiFiGotIP(WiFiEvent_t event, WiFiEventInfo_t info)
     Serial.println("IP address: ");
     Serial.println(IPAddress(info.got_ip.ip_info.ip.addr));
     wifiStatusRefreshPending = true;
+    contentServerWarmupPending = true;
+    contentServerWarmed = false;
 }
 
 void timeavailable(struct timeval *t)
@@ -4263,6 +4581,8 @@ static void saveContentUrl()
     appPrefs.end();
 
     snprintf(saved_content_url, sizeof(saved_content_url), "%s", content_url_input);
+    contentServerWarmed = false;
+    contentServerWarmupPending = (WiFi.status() == WL_CONNECTED);
     Serial.printf("Saved content URL: %s\n", content_url_input);
 }
 
@@ -4397,7 +4717,7 @@ static bool httpGetString(const char *url, String &payload, char *status, size_t
         if (status && statusSize > 0) snprintf(status, statusSize, "Set Content URL first");
         return false;
     }
-    if (WiFi.status() != WL_CONNECTED) {
+    if (!waitForWifiReady(5000)) {
         if (status && statusSize > 0) snprintf(status, statusSize, "WiFi not connected");
         return false;
     }
@@ -4405,8 +4725,12 @@ static bool httpGetString(const char *url, String &payload, char *status, size_t
     Serial.printf("HTTP GET: %s\n", url);
     HTTPClient http;
     http.setTimeout(timeoutMs);
+    http.setConnectTimeout(8000);
+    http.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
     WiFiClient plainClient;
     WiFiClientSecure secureClient;
+    plainClient.setTimeout((timeoutMs + 999) / 1000);
+    secureClient.setTimeout((timeoutMs + 999) / 1000);
     bool began = false;
     if (strncmp(url, "https://", 8) == 0) {
         secureClient.setInsecure();
@@ -4421,16 +4745,69 @@ static bool httpGetString(const char *url, String &payload, char *status, size_t
 
     http.setReuse(false);
     http.addHeader("Connection", "close");
+    http.addHeader("User-Agent", "T5-ePaper-S3/1.0");
+    delay(30);
     int httpCode = http.GET();
     if (httpCode != HTTP_CODE_OK) {
-        if (status && statusSize > 0) snprintf(status, statusSize, "HTTP error: %d", httpCode);
+        String err = http.errorToString(httpCode);
+        if (status && statusSize > 0) snprintf(status, statusSize, "HTTP %d %s", httpCode, err.c_str());
+        Serial.printf("HTTP GET failed (%d): %s\n", httpCode, err.c_str());
         http.end();
+        delay(100);
         return false;
     }
 
     payload = http.getString();
     http.end();
+    delay(80);
     return true;
+}
+
+static bool waitForWifiReady(uint32_t timeoutMs)
+{
+    uint32_t start = millis();
+    while (WiFi.status() != WL_CONNECTED && millis() - start < timeoutMs) {
+        delay(100);
+    }
+    if (WiFi.status() != WL_CONNECTED) {
+        return false;
+    }
+
+    // Give DNS/TCP/IP stack a short settle time after the GOT_IP event. HTTP -1
+    // on ESP32 often occurs when the first client starts immediately after WiFi.
+    if (WiFi.localIP() == IPAddress((uint32_t)0)) {
+        delay(250);
+    }
+    return true;
+}
+
+static void warmupContentServer(bool force)
+{
+    if (!force && contentServerWarmed) {
+        return;
+    }
+    if (!waitForWifiReady(3000)) {
+        return;
+    }
+    if (!force && millis() - lastContentServerWarmup < 30000) {
+        return;
+    }
+
+    char url[320];
+    buildContentApiUrl(url, sizeof(url), "/api/geoip", NULL);
+    if (url[0] == '\0') {
+        return;
+    }
+
+    Serial.printf("Warming content server: %s\n", url);
+    String payload;
+    char status[96];
+    bool ok = httpGetString(url, payload, status, sizeof(status), 8000);
+    contentServerWarmed = ok;
+    lastContentServerWarmup = millis();
+    if (!ok) {
+        Serial.printf("Content server warmup failed: %s\n", status);
+    }
 }
 
 static void urlEncodeSpaces(char *text)
@@ -4456,6 +4833,7 @@ static void urlEncodeSpaces(char *text)
 
 static bool fetchClockWeatherInfo()
 {
+    warmupContentServer();
     clock_weather.loaded = false;
     snprintf(clock_weather.status, sizeof(clock_weather.status), "Syncing clock/weather...");
     snprintf(clock_weather.city, sizeof(clock_weather.city), "Shenzhen");
@@ -4559,17 +4937,21 @@ static void updateBookReaderPagination()
 
 static bool fetchSelectedBook(int32_t bookId)
 {
+    if (loadBookFromSd(bookId, selected_book_title, selected_book_author, selected_book_category, &selected_book_content)) {
+        selected_book_id = bookId;
+        book_reader_page = 0;
+        updateBookReaderPagination();
+        snprintf(book_reader_status, sizeof(book_reader_status), "Loaded from SD");
+        Serial.printf("Loaded selected book %ld from SD cache\n", (long)bookId);
+        return true;
+    }
+
     if (WiFi.status() != WL_CONNECTED) {
-        if (loadBookFromSd(bookId, selected_book_title, selected_book_author, selected_book_category, &selected_book_content)) {
-            selected_book_id = bookId;
-            book_reader_page = 0;
-            updateBookReaderPagination();
-            snprintf(book_reader_status, sizeof(book_reader_status), "Loaded from SD");
-            return true;
-        }
         snprintf(book_reader_status, sizeof(book_reader_status), "WiFi not connected");
         return false;
     }
+
+    warmupContentServer();
 
     char url[320];
     buildBookDetailApiUrl(url, sizeof(url), bookId);
@@ -4730,6 +5112,8 @@ static bool fetchAndSaveBookItem(BookListItem &book)
         return false;
     }
 
+    warmupContentServer();
+
     char url[320];
     buildBookDetailApiUrl(url, sizeof(url), book.id);
     if (url[0] == '\0') {
@@ -4879,6 +5263,8 @@ static bool fetchBookLibrary()
         snprintf(book_library_status, sizeof(book_library_status), "WiFi not connected");
         return false;
     }
+
+    warmupContentServer();
 
     BookListItem fetched_items[MAX_BOOK_ITEMS];
     int fetched_count = 0;
@@ -5105,6 +5491,12 @@ void loop()
 {
     processPendingBookAutoSave();
 
+    if (contentServerWarmupPending && WiFi.status() == WL_CONNECTED) {
+        contentServerWarmupPending = false;
+        delay(750);
+        warmupContentServer(true);
+    }
+
     // Check if NTP time is synced and RTC is not synced
     if (ntp_synced && !rtc_synced) {
         rtc_synced = true;
@@ -5185,10 +5577,14 @@ void loop()
         uint8_t touched = touch.getPoint(&x, &y, 1);
         if (touched) {
             touchWasPressed = true;
+            releasedTouchX = x;
+            releasedTouchY = y;
             if (!touchLatchActive) {
                 touchLatchActive = true;
                 latchedTouchX = x;
                 latchedTouchY = y;
+                releasedTouchX = x;
+                releasedTouchY = y;
             }
 
             // Keep polling while the finger is down, but do not update any key
@@ -5204,7 +5600,7 @@ void loop()
                 // cannot produce two password characters for one physical tap.
                 if (millis() - lastTouchReleaseTime > 120) {
                     lastTouchReleaseTime = millis();
-                    processTouchRelease(latchedTouchX, latchedTouchY);
+                    processTouchRelease(latchedTouchX, latchedTouchY, releasedTouchX, releasedTouchY);
                 } else {
                     touch_loop_interval = millis() + 120;
                 }

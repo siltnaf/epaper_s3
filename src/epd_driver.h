@@ -145,6 +145,17 @@ void epd_push_pixels(Rect_t area, int16_t time, int32_t color);
 void IRAM_ATTR epd_draw_grayscale_image(Rect_t area, uint8_t *data);
 
 /**
+ * @brief Draw a grayscale image using fewer drive frames for faster partial
+ *        updates. This intentionally skips the heavy black/white clearing
+ *        sequence; use occasional normal refreshes to manage ghosting.
+ *
+ * @param area The display area to draw to.
+ * @param data The image data, as 4 bit wide brightness values.
+ * @param frame_count Number of contrast frames to apply, 1..15.
+ */
+void IRAM_ATTR epd_draw_grayscale_image_fast(Rect_t area, uint8_t *data, uint8_t frame_count);
+
+/**
  * @brief Draw a picture to a given area, with some draw mode.
  *
  * @note The image area is not cleared before drawing. For example, this can be
@@ -158,6 +169,8 @@ void IRAM_ATTR epd_draw_grayscale_image(Rect_t area, uint8_t *data);
  *             nibble per line.
  */
 void IRAM_ATTR epd_draw_image(Rect_t area, uint8_t *data, DrawMode_t mode);
+
+void IRAM_ATTR epd_draw_image_fast(Rect_t area, uint8_t *data, DrawMode_t mode, uint8_t frame_count);
 
 void IRAM_ATTR epd_draw_frame_1bit(Rect_t area, uint8_t *ptr, DrawMode_t mode, int32_t time);
 

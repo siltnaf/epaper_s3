@@ -17,9 +17,9 @@
 #include <xtensa/core-macros.h>
 
 #include <string.h>
+#include <math.h>
 
 #if ESP_IDF_VERSION_MAJOR >= 5 // IDF 5+ 
-#include <math.h>
 #endif
 
 /******************************************************************************/
@@ -724,6 +724,12 @@ void IRAM_ATTR epd_draw_grayscale_image(Rect_t area, uint8_t *data)
 }
 
 
+void IRAM_ATTR epd_draw_grayscale_image_fast(Rect_t area, uint8_t *data, uint8_t frame_count)
+{
+    epd_draw_image_fast(area, data, BLACK_ON_WHITE, frame_count);
+}
+
+
 void IRAM_ATTR epd_draw_frame_1bit(Rect_t area, uint8_t *ptr,
                                    DrawMode_t mode, int32_t time)
 {
@@ -815,7 +821,20 @@ void IRAM_ATTR epd_draw_frame_1bit(Rect_t area, uint8_t *ptr,
 
 void IRAM_ATTR epd_draw_image(Rect_t area, uint8_t *data, DrawMode_t mode)
 {
-    uint8_t frame_count = 15;
+    epd_draw_image_fast(area, data, mode, 15);
+}
+
+
+void IRAM_ATTR epd_draw_image_fast(Rect_t area, uint8_t *data, DrawMode_t mode, uint8_t frame_count)
+{
+    if (frame_count < 1)
+    {
+        frame_count = 1;
+    }
+    if (frame_count > 15)
+    {
+        frame_count = 15;
+    }
 
     SemaphoreHandle_t fetch_sem = xSemaphoreCreateBinary();
     SemaphoreHandle_t feed_sem = xSemaphoreCreateBinary();
