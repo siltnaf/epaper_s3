@@ -76,6 +76,7 @@ uint32_t touch_loop_interval = 0;
 bool found_rtc = false;
 bool ntp_synced = false;
 bool rtc_synced = false;
+uint8_t pressedHomeIcon = 0; // 1 = settings, 2 = book, 3 = voice, 4 = calculator, 5 = clock
 bool showingClock = false;
 bool showingCalculator = false;
 bool showingSettings = false;
@@ -83,6 +84,8 @@ bool showingSettingsMenu = false;
 bool showingContentSettings = false;
 bool showingBookLibrary = false;
 bool showingBookReader = false;
+bool showingVoiceStoryLibrary = false;
+bool showingVoiceStoryReader = false;
 bool showingSdMenu = false;
 bool showingSdFolder = false;
 char sd_status_message[96] = "";
@@ -135,6 +138,32 @@ int32_t book_reader_total_pages = 1;
 bool pending_book_auto_save = false;
 int32_t pending_book_auto_save_id = 0;
 uint32_t pending_book_auto_save_after = 0;
+
+// Voice Story variables and structures
+#define MAX_STORY_ITEMS 10
+struct StoryListItem {
+    int32_t id;
+    char title[80];
+    char author[40];
+    char category[40];
+    bool saved;
+};
+StoryListItem story_items[MAX_STORY_ITEMS];
+int story_count = 0;
+int story_total = 0;
+int32_t story_current_page = 1;
+char story_library_status[96] = "Tap story icon to load library";
+int32_t selected_story_id = 0;
+char selected_story_title[80] = "";
+char selected_story_author[40] = "";
+char selected_story_category[40] = "";
+char story_reader_status[96] = "Select a story";
+String selected_story_content;
+int32_t story_reader_page = 0;
+int32_t story_reader_total_pages = 1;
+bool pending_story_auto_save = false;
+int32_t pending_story_auto_save_id = 0;
+uint32_t pending_story_auto_save_after = 0;
 
 struct ClockWeatherInfo {
     char city[64];
@@ -218,6 +247,8 @@ static void drawContentSettingsScreen();
 static void drawBookLibraryScreen();
 static void drawBookReaderScreen();
 static void drawBookLibraryLoadingScreen();
+static void drawVoiceStoryLibraryScreen();
+static void drawVoiceStoryReaderScreen();
 static void drawSdMenuScreen();
 static void drawSdFolderScreen();
 static void formatSdCard();
@@ -226,8 +257,11 @@ static void refreshDisplayWhiteOnly(void (*drawFn)());
 static void refreshSdStatusArea();
 static void drawWifiScanningScreen();
 static void drawBookIcon(int32_t x, int32_t y, int32_t w, int32_t h);
+static void drawVoiceStoryIcon(int32_t x, int32_t y, int32_t w, int32_t h);
+static void drawMusicIcon(int32_t x, int32_t y, int32_t w, int32_t h);
 static void drawBookNavArrowIcon(int32_t x, int32_t y, bool up);
 static void refreshDisplay(void (*drawFn)());
+static void wipeHomeIconArea(uint8_t iconId);
 static void drawWifiPasswordInputBox();
 static void drawContentUrlInputBox();
 static void refreshWifiPasswordArea();
@@ -237,12 +271,17 @@ static void refreshContentKeyboardArea();
 static void refreshWifiStatusIconArea();
 static void refreshBookLibraryListArea();
 static void refreshBookReaderContentArea();
+static void refreshVoiceStoryLibraryListArea();
+static void refreshVoiceStoryReaderContentArea();
+static void refreshVoiceStorySaveIconArea(int storyIndex);
 static uint8_t *copyPhysicalAreaFromFramebuffer(Rect_t area);
 static bool findChangedArea(Rect_t baseArea, const uint8_t *oldBuffer, const uint8_t *newBuffer, Rect_t *changedArea);
 static bool findWhiteRecoveryArea(Rect_t baseArea, const uint8_t *oldBuffer, const uint8_t *newBuffer, Rect_t *wipeArea);
 static bool findBlackDrawArea(Rect_t baseArea, const uint8_t *oldBuffer, const uint8_t *newBuffer, Rect_t *drawArea);
 static bool fetchSelectedBook(int32_t bookId);
+static bool fetchSelectedVoiceStory(int32_t storyId);
 static void buildBookDetailApiUrl(char *out, size_t outSize, int32_t bookId);
+static void buildVoiceStoryDetailApiUrl(char *out, size_t outSize, int32_t storyId);
 static void buildContentApiUrl(char *out, size_t outSize, const char *endpoint, const char *query = NULL);
 static bool httpGetString(const char *url, String &payload, char *status, size_t statusSize, uint32_t timeoutMs = 10000);
 static bool waitForWifiReady(uint32_t timeoutMs);
@@ -285,6 +324,16 @@ static void refreshBookSaveIconArea(int bookIndex);
 static bool fetchAndSaveBookItem(BookListItem &book);
 static void queueSelectedBookAutoSave();
 static void processPendingBookAutoSave();
+
+static bool fetchVoiceStoryLibrary();
+static void buildVoiceStoriesApiUrl(char *out, size_t outSize);
+static bool saveStoryToSd(int32_t storyId, const char *title, const char *author, const char *category, const char *content);
+static bool loadStoryFromSd(int32_t storyId, char *title, char *author, char *category, String *content);
+static bool loadSavedStoriesFromSd();
+static bool isStorySavedOnSd(int32_t storyId);
+static bool fetchAndSaveStoryItem(StoryListItem &story);
+static void queueSelectedStoryAutoSave();
+static void processPendingStoryAutoSave();
 
 static const uint8_t clockIcon50x50[] = {
     0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
@@ -373,6 +422,7 @@ static const int32_t BOOK_LIST_REFRESH_BOTTOM_MARGIN = 8;
 static const int32_t BOOK_SAVE_ICON_SIZE = 28;
 static const int32_t BOOK_SAVE_ICON_MARGIN = 4;
 static const char BOOK_SD_FOLDER[] = "/books";
+static const char STORY_SD_FOLDER[] = "/stories";
 static const int32_t BOOK_READER_CONTENT_X = 24;
 static const int32_t BOOK_READER_CONTENT_Y = 187;
 static const int32_t BOOK_READER_CONTENT_W = PORTRAIT_WIDTH - 48;
@@ -782,10 +832,15 @@ static void drawSettingsIcon(int32_t x, int32_t y, int32_t size)
         py[i * 4 + 3] = cy + (int32_t)roundf(sinf(a3) * R1);
     }
 
-    // Connect the 32 points with thin lines to form a clean continuous gear outline
+    // Connect the 32 points with gear outline
+    int32_t thickness = (pressedHomeIcon == 1) ? 4 : 1;
     for (int i = 0; i < 32; ++i) {
         int next = (i + 1) % 32;
-        portraitDrawLine(px[i], py[i], px[next], py[next], 0x00);
+        if (thickness > 1) {
+            drawThickPortraitLine(px[i], py[i], px[next], py[next], thickness, 0x00);
+        } else {
+            portraitDrawLine(px[i], py[i], px[next], py[next], 0x00);
+        }
     }
 
     // Draw the dotted circle outline (between r_inner and R1)
@@ -795,11 +850,21 @@ static void drawSettingsIcon(int32_t x, int32_t y, int32_t size)
         float angle = (i * 360.0f / (float)num_dots) * DEG_TO_RAD;
         int32_t dx = cx + (int32_t)roundf(cosf(angle) * r_dotted);
         int32_t dy = cy + (int32_t)roundf(sinf(angle) * r_dotted);
-        portraitPixel(dx, dy, 0x00);
+        if (thickness > 1) {
+            portraitFillCircle(dx, dy, 2, 0x00);
+        } else {
+            portraitPixel(dx, dy, 0x00);
+        }
     }
 
     // Draw the inner circle outline
-    portraitDrawCircle(cx, cy, (int32_t)r_inner, 0x00);
+    if (thickness > 1) {
+        for (int32_t t = 0; t < thickness; ++t) {
+            portraitDrawCircle(cx, cy, (int32_t)r_inner - t + thickness / 2, 0x00);
+        }
+    } else {
+        portraitDrawCircle(cx, cy, (int32_t)r_inner, 0x00);
+    }
 }
 
 static void drawBookIcon(int32_t x, int32_t y, int32_t w, int32_t h)
@@ -813,26 +878,178 @@ static void drawBookIcon(int32_t x, int32_t y, int32_t w, int32_t h)
     const int32_t bottom = y + h - marginY;
     const int32_t center = x + w / 2;
     const int32_t curve = 8;
+    const int32_t thickness = (pressedHomeIcon == 2) ? 4 : 1;
 
-    // Left cover/page outline
-    portraitDrawLine(center, top + curve, left, top, 0x00);
-    portraitDrawLine(left, top, left, bottom - curve, 0x00);
-    portraitDrawLine(left, bottom - curve, center, bottom, 0x00);
+    if (thickness > 1) {
+        // Left cover/page outline
+        drawThickPortraitLine(center, top + curve, left, top, thickness, 0x00);
+        drawThickPortraitLine(left, top, left, bottom - curve, thickness, 0x00);
+        drawThickPortraitLine(left, bottom - curve, center, bottom, thickness, 0x00);
 
-    // Right cover/page outline
-    portraitDrawLine(center, top + curve, right, top, 0x00);
-    portraitDrawLine(right, top, right, bottom - curve, 0x00);
-    portraitDrawLine(right, bottom - curve, center, bottom, 0x00);
+        // Right cover/page outline
+        drawThickPortraitLine(center, top + curve, right, top, thickness, 0x00);
+        drawThickPortraitLine(right, top, right, bottom - curve, thickness, 0x00);
+        drawThickPortraitLine(right, bottom - curve, center, bottom, thickness, 0x00);
 
-    // Center spine
-    portraitDrawLine(center, top + curve, center, bottom, 0x00);
-    portraitDrawLine(center + 1, top + curve + 1, center + 1, bottom - 1, 0x00);
+        // Center spine
+        drawThickPortraitLine(center, top + curve, center, bottom, thickness + 1, 0x00);
 
-    // Page lines
-    for (int32_t i = 0; i < 3; ++i) {
-        int32_t yy = top + 10 + i * 9;
-        portraitDrawLine(left + 9, yy, center - 9, yy + 4, 0x00);
-        portraitDrawLine(center + 9, yy + 4, right - 9, yy, 0x00);
+        // Page lines
+        for (int32_t i = 0; i < 3; ++i) {
+            int32_t yy = top + 10 + i * 9;
+            drawThickPortraitLine(left + 9, yy, center - 9, yy + 4, thickness, 0x00);
+            drawThickPortraitLine(center + 9, yy + 4, right - 9, yy, thickness, 0x00);
+        }
+    } else {
+        // Left cover/page outline
+        portraitDrawLine(center, top + curve, left, top, 0x00);
+        portraitDrawLine(left, top, left, bottom - curve, 0x00);
+        portraitDrawLine(left, bottom - curve, center, bottom, 0x00);
+
+        // Right cover/page outline
+        portraitDrawLine(center, top + curve, right, top, 0x00);
+        portraitDrawLine(right, top, right, bottom - curve, 0x00);
+        portraitDrawLine(right, bottom - curve, center, bottom, 0x00);
+
+        // Center spine
+        portraitDrawLine(center, top + curve, center, bottom, 0x00);
+        portraitDrawLine(center + 1, top + curve + 1, center + 1, bottom - 1, 0x00);
+
+        // Page lines
+        for (int32_t i = 0; i < 3; ++i) {
+            int32_t yy = top + 10 + i * 9;
+            portraitDrawLine(left + 9, yy, center - 9, yy + 4, 0x00);
+            portraitDrawLine(center + 9, yy + 4, right - 9, yy, 0x00);
+        }
+    }
+}
+
+static void drawRoundedRectOutline(int32_t rx, int32_t ry, int32_t rw, int32_t rh, int32_t r, uint8_t color)
+{
+    // Draw 4 straight lines
+    portraitDrawLine(rx + r, ry, rx + rw - r, ry, color);
+    portraitDrawLine(rx + r, ry + rh - 1, rx + rw - r, ry + rh - 1, color);
+    portraitDrawLine(rx, ry + r, rx, ry + rh - r, color);
+    portraitDrawLine(rx + rw - 1, ry + r, rx + rw - 1, ry + rh - r, color);
+
+    // Draw 4 corner arcs
+    for (int deg = 180; deg <= 270; deg += 3) {
+        float a = deg * DEG_TO_RAD;
+        portraitPixel(rx + r + (int32_t)roundf(cosf(a) * r), ry + r + (int32_t)roundf(sinf(a) * r), color);
+    }
+    for (int deg = 270; deg <= 360; deg += 3) {
+        float a = deg * DEG_TO_RAD;
+        portraitPixel(rx + rw - r + (int32_t)roundf(cosf(a) * r), ry + r + (int32_t)roundf(sinf(a) * r), color);
+    }
+    for (int deg = 0; deg <= 90; deg += 3) {
+        float a = deg * DEG_TO_RAD;
+        portraitPixel(rx + rw - r + (int32_t)roundf(cosf(a) * r), ry + rh - r + (int32_t)roundf(sinf(a) * r), color);
+    }
+    for (int deg = 90; deg <= 180; deg += 3) {
+        float a = deg * DEG_TO_RAD;
+        portraitPixel(rx + r + (int32_t)roundf(cosf(a) * r), ry + rh - r + (int32_t)roundf(sinf(a) * r), color);
+    }
+}
+
+static void drawVoiceStoryIcon(int32_t x, int32_t y, int32_t w, int32_t h)
+{
+    // Voice-story icon: exact vector match of the uploaded headset (headphones) graphic.
+    const int32_t cx = x + w / 2;
+    const int32_t cy = y + h / 2;
+    const int32_t arcCenterY = cy - 2;
+    const int32_t R = 41;
+    // THINNEST line (1px) for the voice story icon by default, and thick line (4px) when pressed
+    const int32_t thickness = (pressedHomeIcon == 3) ? 4 : 1;
+
+    // Draw the headband arc (thick top semicircle from 180 to 360 degrees)
+    for (int32_t t = 0; t < thickness; ++t) {
+        int32_t r_t = R - t;
+        for (int deg = 180; deg <= 360; deg += 1) {
+            float a = deg * DEG_TO_RAD;
+            int32_t px = cx + (int32_t)roundf(cosf(a) * r_t);
+            int32_t py = arcCenterY + (int32_t)roundf(sinf(a) * r_t);
+            portraitPixel(px, py, 0x00);
+        }
+    }
+
+    // Ear pads parameters
+    const int32_t earW = 24;
+    const int32_t earH = 44;
+    const int32_t earY = arcCenterY;
+    const int32_t leftEarX = cx - R;
+    const int32_t rightEarX = cx + R - earW;
+
+    // Draw thick/thin rounded rectangular ear pads
+    for (int32_t t = 0; t < thickness; ++t) {
+        drawRoundedRectOutline(leftEarX + t, earY + t, earW - 2 * t, earH - 2 * t, max((int32_t)1, 8 - t), 0x00);
+    }
+    for (int32_t t = 0; t < thickness; ++t) {
+        drawRoundedRectOutline(rightEarX + t, earY + t, earW - 2 * t, earH - 2 * t, max((int32_t)1, 8 - t), 0x00);
+    }
+}
+
+static void drawMusicIcon(int32_t x, int32_t y, int32_t w, int32_t h)
+{
+    // Music icon: exact vector match of the uploaded music note graphic.
+    const int32_t cx = x + w / 2;
+    const int32_t cy = y + h / 2;
+    const int32_t thickness = (pressedHomeIcon == 6) ? 4 : 1;
+
+    // The note head is a tilted ellipse/circle drawn near the bottom-left of the icon box.
+    const int32_t headCx = cx - 14;
+    const int32_t headCy = cy + 18;
+    const int32_t headR = 19;
+
+    // Draw the ellipse/note head outline
+    if (thickness > 1) {
+        for (int32_t t = 0; t < thickness; ++t) {
+            portraitDrawCircle(headCx, headCy, headR - t + thickness / 2, 0x00);
+        }
+    } else {
+        portraitDrawCircle(headCx, headCy, headR, 0x00);
+    }
+
+    // Stem: vertical line going up from the right of the note head.
+    const int32_t stemX = headCx + headR - thickness / 2;
+    const int32_t stemStartY = headCy;
+    const int32_t stemEndY = cy - 28;
+
+    if (thickness > 1) {
+        drawThickPortraitLine(stemX, stemStartY, stemX, stemEndY, thickness, 0x00);
+    } else {
+        portraitDrawLine(stemX, stemStartY, stemX, stemEndY, 0x00);
+    }
+
+    // Flag: curved flag going down and right from the top of the stem.
+    const int32_t flagStartX = stemX;
+    const int32_t flagStartY = stemEndY;
+    const int32_t flagEndX = stemX + 26;
+    const int32_t flagEndY = stemEndY + 12;
+
+    // The curved flag is made of a bezier-like curve using a set of coordinates, or arcs.
+    // Let's implement it smoothly using thin lines.
+    if (thickness > 1) {
+        for (int32_t t = 0; t < thickness; ++t) {
+            // Upper curve of flag
+            portraitDrawLine(flagStartX, flagStartY + t, flagStartX + 12, flagStartY + 2 + t, 0x00);
+            portraitDrawLine(flagStartX + 12, flagStartY + 2 + t, flagStartX + 20, flagStartY + 8 + t, 0x00);
+            portraitDrawLine(flagStartX + 20, flagStartY + 8 + t, flagEndX, flagEndY + t, 0x00);
+            // Stem connection / flag thickness
+            portraitDrawLine(flagEndX, flagEndY + t, flagEndX - 4, flagEndY + 12 + t, 0x00);
+            portraitDrawLine(flagEndX - 4, flagEndY + 12 + t, flagStartX + 10, flagStartY + 16 + t, 0x00);
+            portraitDrawLine(flagStartX + 10, flagStartY + 16 + t, flagStartX, flagStartY + 14 + t, 0x00);
+        }
+    } else {
+        // Draw the precise thinnest continuous line outline of the flag:
+        // Upper edge
+        portraitDrawLine(flagStartX, flagStartY, flagStartX + 12, flagStartY + 2, 0x00);
+        portraitDrawLine(flagStartX + 12, flagStartY + 2, flagStartX + 20, flagStartY + 8, 0x00);
+        portraitDrawLine(flagStartX + 20, flagStartY + 8, flagEndX, flagEndY, 0x00);
+        // Outer tip/end drop
+        portraitDrawLine(flagEndX, flagEndY, flagEndX - 4, flagEndY + 12, 0x00);
+        // Under edge curve back to stem
+        portraitDrawLine(flagEndX - 4, flagEndY + 12, flagStartX + 10, flagStartY + 16, 0x00);
+        portraitDrawLine(flagStartX + 10, flagStartY + 16, flagStartX, flagStartY + 14, 0x00);
     }
 }
 
@@ -2306,31 +2523,65 @@ static void drawPortraitHome()
     // Simple recognisable portrait-mode icons: settings, calculator, clock (Thin outlines, no fill)
     int32_t sx = startX;
     int32_t sy = startY;
+    int32_t cx = startX + icon + gap;
+    int32_t cy = startY;
     drawSettingsIcon(sx, sy, icon);
 
     // Book icon placed directly below the settings icon.
     drawBookIcon(sx, sy + icon + gap, icon, icon);
 
-    int32_t cx = startX + icon + gap;
-    int32_t cy = startY;
+    // Voice story icon placed to the right of the book icon on the second row.
+    drawVoiceStoryIcon(cx, sy + icon + gap, icon, icon);
+
+    int32_t kx = startX + (icon + gap) * 2;
+    // Music icon placed directly below the clock icon on the second row.
+    drawMusicIcon(kx, sy + icon + gap, icon, icon);
+
     // Calculator Icon (Outline, no fill)
-    portraitDrawRect(cx + 28, cy + 24, 62, 18, 0x00);
-    for (int r = 0; r < 3; ++r) {
-        for (int c = 0; c < 3; ++c) {
-            portraitDrawRect(cx + 28 + c * 24, cy + 54 + r * 18, 14, 10, 0x00);
+    int32_t calcThickness = (pressedHomeIcon == 4) ? 4 : 1;
+    if (calcThickness > 1) {
+        drawThickPortraitLine(cx + 28, cy + 24, cx + 28 + 62, cy + 24, calcThickness, 0x00);
+        drawThickPortraitLine(cx + 28, cy + 24 + 18, cx + 28 + 62, cy + 24 + 18, calcThickness, 0x00);
+        drawThickPortraitLine(cx + 28, cy + 24, cx + 28, cy + 24 + 18, calcThickness, 0x00);
+        drawThickPortraitLine(cx + 28 + 62, cy + 24, cx + 28 + 62, cy + 24 + 18, calcThickness, 0x00);
+
+        for (int r = 0; r < 3; ++r) {
+            for (int c = 0; c < 3; ++c) {
+                int32_t bx = cx + 28 + c * 24;
+                int32_t by = cy + 54 + r * 18;
+                drawThickPortraitLine(bx, by, bx + 14, by, calcThickness, 0x00);
+                drawThickPortraitLine(bx, by + 10, bx + 14, by + 10, calcThickness, 0x00);
+                drawThickPortraitLine(bx, by, bx, by + 10, calcThickness, 0x00);
+                drawThickPortraitLine(bx + 14, by, bx + 14, by + 10, calcThickness, 0x00);
+            }
+        }
+    } else {
+        portraitDrawRect(cx + 28, cy + 24, 62, 18, 0x00);
+        for (int r = 0; r < 3; ++r) {
+            for (int c = 0; c < 3; ++c) {
+                portraitDrawRect(cx + 28 + c * 24, cy + 54 + r * 18, 14, 10, 0x00);
+            }
         }
     }
 
-    int32_t kx = startX + (icon + gap) * 2;
     int32_t ky = startY;
     // Clock Icon (Outline, thinnest line as possible, no fill)
     int32_t clock_cx = kx + 59;
     int32_t clock_cy = ky + 59;
-    portraitDrawCircle(clock_cx, clock_cy, 45, 0x00);
-    portraitDrawCircle(clock_cx, clock_cy, 2, 0x00);
-    portraitDrawLine(clock_cx, clock_cy, clock_cx - 15, clock_cy - 12, 0x00); // Hour hand
-    portraitDrawLine(clock_cx, clock_cy, clock_cx + 25, clock_cy - 15, 0x00); // Minute hand
-
+    int32_t clockThickness = (pressedHomeIcon == 5) ? 4 : 1;
+    if (clockThickness > 1) {
+        for (int32_t t = 0; t < clockThickness; ++t) {
+            portraitDrawCircle(clock_cx, clock_cy, 45 - t + clockThickness/2, 0x00);
+        }
+        portraitFillCircle(clock_cx, clock_cy, 4, 0x00);
+        drawThickPortraitLine(clock_cx, clock_cy, clock_cx - 15, clock_cy - 12, clockThickness, 0x00); // Hour hand
+        drawThickPortraitLine(clock_cx, clock_cy, clock_cx + 25, clock_cy - 15, clockThickness, 0x00); // Minute hand
+    } else {
+        portraitDrawCircle(clock_cx, clock_cy, 45, 0x00);
+        portraitDrawCircle(clock_cx, clock_cy, 2, 0x00);
+        portraitDrawLine(clock_cx, clock_cy, clock_cx - 15, clock_cy - 12, 0x00); // Hour hand
+        portraitDrawLine(clock_cx, clock_cy, clock_cx + 25, clock_cy - 15, 0x00); // Minute hand
+    }
 }
 
 static void drawBookLibraryLoadingScreen()
@@ -2435,6 +2686,196 @@ static void drawBookLibraryScreen()
     // swipe down/right for previous page. No visible up/down icons.
 
     drawBookLibraryRowsArea();
+}
+
+static void drawVoiceStoryRowsArea()
+{
+    portraitFillRect(0,
+                     BOOK_LIST_REFRESH_Y,
+                     PORTRAIT_WIDTH,
+                     PORTRAIT_HEIGHT - BOOK_LIST_REFRESH_Y - BOOK_LIST_REFRESH_BOTTOM_MARGIN,
+                     0xFF);
+
+    if (story_count > 0) {
+        char summary[32];
+        int displayedCount = (int)((story_current_page - 1) * MAX_STORY_ITEMS) + story_count;
+        if (story_total > 0 && displayedCount > story_total) {
+            displayedCount = story_total;
+        }
+        snprintf(summary, sizeof(summary), "%d/%d", displayedCount, story_total);
+        portraitFillRect(54, 126, PORTRAIT_WIDTH - 108, 38, 0xFF);
+        drawPortraitTextInRectCenteredScaled(summary,
+                                             54,
+                                             132,
+                                             PORTRAIT_WIDTH - 108,
+                                             28,
+                                             (GFXfont *)&FiraSans,
+                                             0.46f);
+    }
+
+    if (story_count <= 0) {
+        drawPortraitTextInRectCenteredScaled(story_library_status,
+                                             34,
+                                             250,
+                                             PORTRAIT_WIDTH - 68,
+                                             80,
+                                             (GFXfont *)&FiraSans,
+                                             0.72f);
+        return;
+    }
+
+    for (int i = 0; i < story_count; ++i) {
+        const int32_t y = BOOK_LIST_Y + i * BOOK_LIST_ROW_H;
+        if (y + BOOK_LIST_ROW_BOX_H > PORTRAIT_HEIGHT - 14) {
+            break;
+        }
+        portraitDrawRect(BOOK_LIST_X, y, BOOK_LIST_W, BOOK_LIST_ROW_BOX_H, 0x00);
+
+        // Display Chinese story title
+        drawUtf8ChineseTextLeftAligned(story_items[i].title, BOOK_LIST_X + 16, y, BOOK_LIST_ROW_BOX_H);
+
+        // Show category on the right side of the row (right-aligned, vertically centered)
+        if (story_items[i].category[0] != '\0') {
+            drawUtf8ChineseTextRightAligned(story_items[i].category, BOOK_LIST_X + BOOK_LIST_W - BOOK_SAVE_ICON_SIZE - 20, y, BOOK_LIST_ROW_BOX_H);
+        }
+    }
+
+    // Draw save icons inside the row boxes, near the right edge
+    for (int i = 0; i < story_count; ++i) {
+        const int32_t y = BOOK_LIST_Y + i * BOOK_LIST_ROW_H;
+        int32_t saveIconX = BOOK_LIST_X + BOOK_LIST_W - BOOK_SAVE_ICON_SIZE - 8;
+        int32_t saveIconY = y + (BOOK_LIST_ROW_BOX_H - BOOK_SAVE_ICON_SIZE) / 2;
+        drawBookSaveIcon(saveIconX, saveIconY, story_items[i].saved);
+    }
+}
+
+static void drawVoiceStoryLibraryScreen()
+{
+    memset(framebuffer, 0xFF, EPD_WIDTH * EPD_HEIGHT / 2);
+    drawTopStatusBar();
+
+    // draw "故事" (Stories) in Chinese
+    drawUtf8ChineseTextInRectSingleWidth("故事", 0, 84, PORTRAIT_WIDTH, 40);
+
+    drawVoiceStoryRowsArea();
+}
+
+static void drawVoiceStoryReaderContentPage()
+{
+    portraitFillRect(0,
+                     BOOK_READER_CONTENT_Y,
+                     PORTRAIT_WIDTH,
+                     PORTRAIT_HEIGHT - BOOK_READER_CONTENT_Y - BOOK_LIST_REFRESH_BOTTOM_MARGIN,
+                     0xFF);
+
+    if (selected_story_content.length() == 0) {
+        drawPortraitTextInRectCenteredScaled(story_reader_status,
+                                             34,
+                                             250,
+                                             PORTRAIT_WIDTH - 68,
+                                             80,
+                                             (GFXfont *)&FiraSans,
+                                             0.72f);
+        return;
+    }
+
+    const int32_t linesPerPage = max((int32_t)1, (PORTRAIT_HEIGHT - BOOK_READER_CONTENT_Y - 30) / BOOK_READER_LINE_H);
+    const int32_t targetPage = max((int32_t)0, story_reader_page);
+    const int32_t maxLineWidth = BOOK_READER_CONTENT_W - 4;
+
+    const char *p = selected_story_content.c_str();
+    uint32_t cp = 0;
+    int32_t pageIndex = 0;
+    int32_t lineIndex = 0;
+    int32_t lineWidth = 0;
+    bool lineHasContent = false;
+    char line[160];
+    size_t lineLen = 0;
+    line[0] = '\0';
+
+    while (*p != '\0' && lineIndex < linesPerPage) {
+        const char *cpStart = p;
+        if (!utf8NextCodepoint(&p, &cp)) {
+            break;
+        }
+        const char *cpEnd = p;
+
+        if (cp == '\r') {
+            continue;
+        }
+
+        if (cp == '\n') {
+            if (pageIndex == targetPage && lineLen > 0) {
+                drawUtf8ChineseTextLeftAlignedClippedNarrow(line, BOOK_READER_CONTENT_X, BOOK_READER_CONTENT_Y + lineIndex * BOOK_READER_LINE_H, BOOK_READER_CONTENT_W, BOOK_READER_LINE_H);
+            }
+            if (pageIndex == targetPage) {
+                ++lineIndex;
+                if (lineIndex >= linesPerPage) {
+                    break;
+                }
+            } else if (++lineIndex >= linesPerPage) {
+                ++pageIndex;
+                lineIndex = 0;
+            }
+
+            lineLen = 0;
+            lineWidth = 0;
+            lineHasContent = false;
+            line[0] = '\0';
+            continue;
+        }
+
+        const int32_t advance = chineseTextCodepointAdvanceNarrow(cp);
+        if (lineHasContent && lineWidth + advance > maxLineWidth) {
+            if (pageIndex == targetPage) {
+                drawUtf8ChineseTextLeftAlignedClippedNarrow(line, BOOK_READER_CONTENT_X, BOOK_READER_CONTENT_Y + lineIndex * BOOK_READER_LINE_H, BOOK_READER_CONTENT_W, BOOK_READER_LINE_H);
+                ++lineIndex;
+                if (lineIndex >= linesPerPage) {
+                    break;
+                }
+            } else if (++lineIndex >= linesPerPage) {
+                ++pageIndex;
+                lineIndex = 0;
+            }
+
+            lineLen = 0;
+            lineWidth = 0;
+            lineHasContent = false;
+            line[0] = '\0';
+        }
+
+        if (pageIndex == targetPage) {
+            appendUtf8CodepointToBuffer(line, sizeof(line), &lineLen, cpStart, cpEnd);
+        }
+        lineWidth += advance;
+        lineHasContent = true;
+    }
+
+    if (lineLen > 0 && pageIndex == targetPage && lineIndex < linesPerPage) {
+        drawUtf8ChineseTextLeftAlignedClippedNarrow(line, BOOK_READER_CONTENT_X, BOOK_READER_CONTENT_Y + lineIndex * BOOK_READER_LINE_H, BOOK_READER_CONTENT_W, BOOK_READER_LINE_H);
+    }
+}
+
+static void drawVoiceStoryReaderScreen()
+{
+    memset(framebuffer, 0xFF, EPD_WIDTH * EPD_HEIGHT / 2);
+    drawTopStatusBar();
+
+    const char *title = selected_story_title[0] != '\0' ? selected_story_title : story_reader_status;
+    drawUtf8ChineseTextLeftAlignedClipped(title, 24, 84, PORTRAIT_WIDTH - 48, 40);
+    drawUtf8ChineseTextLeftAlignedClipped(title, 24 + BOOK_READER_FONT_BOLD_PIXELS, 84, PORTRAIT_WIDTH - 48, 40);
+
+    char summary[32];
+    snprintf(summary, sizeof(summary), "%ld/%ld", (long)(story_reader_page + 1), (long)story_reader_total_pages);
+    drawPortraitTextInRectCenteredScaled(summary,
+                                         54,
+                                         132,
+                                         PORTRAIT_WIDTH - 108,
+                                         28,
+                                         (GFXfont *)&FiraSans,
+                                         0.46f);
+
+    drawVoiceStoryReaderContentPage();
 }
 
 static int32_t utf8CodepointCount(const char *text)
@@ -3813,6 +4254,61 @@ static void refreshDisplay(void (*drawFn)())
     refreshDisplayExtended(drawFn, false);
 }
 
+static void wipeHomeIconArea(uint8_t iconId)
+{
+    if (iconId < 1 || iconId > 6) {
+        return;
+    }
+
+    const int32_t icon = HOME_ICON_SIZE;
+    const int32_t gap = HOME_ICON_GAP;
+    const int32_t startX = homeIconStartX();
+    const int32_t startY = HOME_ICON_START_Y;
+    const int32_t cx = startX + icon + gap;
+    const int32_t kx = startX + (icon + gap) * 2;
+
+    int32_t rx = 0;
+    int32_t ry = 0;
+
+    switch (iconId) {
+    case 1: // Settings
+        rx = startX;
+        ry = startY;
+        break;
+    case 2: // Book
+        rx = startX;
+        ry = startY + icon + gap;
+        break;
+    case 3: // Voice story
+        rx = cx;
+        ry = startY + icon + gap;
+        break;
+    case 4: // Calculator
+        rx = cx;
+        ry = startY;
+        break;
+    case 5: // Clock
+        rx = kx;
+        ry = startY;
+        break;
+    case 6: // Music
+        rx = kx;
+        ry = startY + icon + gap;
+        break;
+    }
+
+    // Expand area slightly to make sure all thick bold line pixels are covered
+    const int32_t margin = 10;
+    Rect_t area = portraitRectToPhysicalRect(rx - margin, ry - margin, icon + margin * 2, icon + margin * 2);
+
+    epd_poweron();
+    // Partial wipe to white: push multiple white pulses to clean the EPD cells for this icon region
+    epd_push_pixels(area, 50, 1);
+    epd_push_pixels(area, 50, 1);
+    epd_push_pixels(area, 50, 1);
+    epd_poweroff();
+}
+
 static void refreshDisplayWhiteOnly(void (*drawFn)())
 {
     epd_poweron();
@@ -3939,6 +4435,101 @@ static void refreshBookReaderContentArea()
     // After a white wipe, the fast partial waveform can leave newly drawn
     // reader text faint. Use the normal grayscale waveform for this partial
     // content band so the new page's black Chinese glyphs are darker/crisper.
+    epd_draw_grayscale_image(readerArea, readerBuffer);
+    epd_poweroff();
+
+    free(counterBuffer);
+    free(readerBuffer);
+}
+
+static void refreshVoiceStoryLibraryListArea()
+{
+    drawVoiceStoryRowsArea();
+
+    Rect_t counterArea = portraitRectToPhysicalRect(54, 126, PORTRAIT_WIDTH - 108, 38);
+    uint8_t *counterBuffer = copyPhysicalAreaFromFramebuffer(counterArea);
+
+    const int32_t listRefreshH = PORTRAIT_HEIGHT - BOOK_LIST_REFRESH_Y - BOOK_LIST_REFRESH_BOTTOM_MARGIN;
+    Rect_t listArea = portraitRectToPhysicalRect(0, BOOK_LIST_REFRESH_Y, PORTRAIT_WIDTH, listRefreshH);
+    uint8_t *listBuffer = copyPhysicalAreaFromFramebuffer(listArea);
+    if (!counterBuffer || !listBuffer) {
+        if (counterBuffer) free(counterBuffer);
+        if (listBuffer) free(listBuffer);
+        return;
+    }
+
+    epd_poweron();
+    epd_push_pixels(counterArea, 55, 1);
+    epd_push_pixels(counterArea, 55, 1);
+    epd_push_pixels(counterArea, 55, 1);
+    epd_push_pixels(listArea, 55, 1);
+    epd_push_pixels(listArea, 55, 1);
+    epd_push_pixels(listArea, 55, 1);
+    epd_draw_grayscale_image(counterArea, counterBuffer);
+    epd_draw_grayscale_image_fast(listArea, listBuffer, EPD_FAST_PARTIAL_FRAMES);
+    epd_poweroff();
+
+    free(counterBuffer);
+    free(listBuffer);
+}
+
+static void refreshVoiceStorySaveIconArea(int storyIndex)
+{
+    if (storyIndex < 0 || storyIndex >= story_count) {
+        return;
+    }
+
+    const int32_t rowY = BOOK_LIST_Y + storyIndex * BOOK_LIST_ROW_H;
+    const int32_t saveIconX = BOOK_LIST_X + BOOK_LIST_W - BOOK_SAVE_ICON_SIZE - 8;
+    const int32_t saveIconY = rowY + (BOOK_LIST_ROW_BOX_H - BOOK_SAVE_ICON_SIZE) / 2;
+    const int32_t margin = 4;
+
+    drawBookSaveIcon(saveIconX, saveIconY, story_items[storyIndex].saved);
+
+    Rect_t iconArea = portraitRectToPhysicalRect(saveIconX - margin,
+                                                 saveIconY - margin,
+                                                 BOOK_SAVE_ICON_SIZE + margin * 2,
+                                                 BOOK_SAVE_ICON_SIZE + margin * 2);
+    uint8_t *iconBuffer = copyPhysicalAreaFromFramebuffer(iconArea);
+    if (!iconBuffer) {
+        return;
+    }
+
+    epd_poweron();
+    epd_draw_grayscale_image_fast(iconArea, iconBuffer, EPD_FAST_PARTIAL_FRAMES);
+    epd_poweroff();
+
+    free(iconBuffer);
+}
+
+static void refreshVoiceStoryReaderContentArea()
+{
+    story_reader_total_pages = countBookReaderPagesByPixelWrap(selected_story_content.c_str());
+    if (story_reader_page < 0) story_reader_page = 0;
+    if (story_reader_page >= story_reader_total_pages) story_reader_page = story_reader_total_pages - 1;
+
+    drawVoiceStoryReaderScreen();
+
+    Rect_t counterArea = portraitRectToPhysicalRect(54, 126, PORTRAIT_WIDTH - 108, 38);
+    uint8_t *counterBuffer = copyPhysicalAreaFromFramebuffer(counterArea);
+
+    const int32_t readerRefreshH = PORTRAIT_HEIGHT - BOOK_READER_CONTENT_Y - BOOK_LIST_REFRESH_BOTTOM_MARGIN;
+    Rect_t readerArea = portraitRectToPhysicalRect(0, BOOK_READER_CONTENT_Y, PORTRAIT_WIDTH, readerRefreshH);
+    uint8_t *readerBuffer = copyPhysicalAreaFromFramebuffer(readerArea);
+    if (!counterBuffer || !readerBuffer) {
+        if (counterBuffer) free(counterBuffer);
+        if (readerBuffer) free(readerBuffer);
+        return;
+    }
+
+    epd_poweron();
+    epd_push_pixels(counterArea, 55, 1);
+    epd_push_pixels(counterArea, 55, 1);
+    epd_push_pixels(counterArea, 55, 1);
+    epd_push_pixels(readerArea, 55, 1);
+    epd_push_pixels(readerArea, 55, 1);
+    epd_push_pixels(readerArea, 55, 1);
+    epd_draw_grayscale_image(counterArea, counterBuffer);
     epd_draw_grayscale_image(readerArea, readerBuffer);
     epd_poweroff();
 
@@ -4122,6 +4713,20 @@ static bool touchHitsBookTile(int16_t tx, int16_t ty)
     const int32_t bookX = homeIconStartX();
     const int32_t bookY = HOME_ICON_START_Y + HOME_ICON_SIZE + HOME_ICON_GAP;
     return touchHitsPortraitRect(tx, ty, bookX, bookY, HOME_ICON_SIZE, HOME_ICON_SIZE);
+}
+
+static bool touchHitsVoiceStoryTile(int16_t tx, int16_t ty)
+{
+    const int32_t voiceX = homeIconStartX() + HOME_ICON_SIZE + HOME_ICON_GAP;
+    const int32_t voiceY = HOME_ICON_START_Y + HOME_ICON_SIZE + HOME_ICON_GAP;
+    return touchHitsPortraitRect(tx, ty, voiceX, voiceY, HOME_ICON_SIZE, HOME_ICON_SIZE);
+}
+
+static bool touchHitsMusicTile(int16_t tx, int16_t ty)
+{
+    const int32_t musicX = homeIconStartX() + (HOME_ICON_SIZE + HOME_ICON_GAP) * 2;
+    const int32_t musicY = HOME_ICON_START_Y + HOME_ICON_SIZE + HOME_ICON_GAP;
+    return touchHitsPortraitRect(tx, ty, musicX, musicY, HOME_ICON_SIZE, HOME_ICON_SIZE);
 }
 
 static bool touchHitsWifiStatusIcon(int16_t tx, int16_t ty)
@@ -4357,61 +4962,139 @@ static void processTouchRelease(int16_t startX, int16_t startY, int16_t endX, in
         return;
     }
 
-    if (!showingClock && !showingCalculator && !showingSettings && !showingSettingsMenu && !showingContentSettings && !showingBookLibrary && !showingBookReader && !showingSdMenu && !showingSdFolder && touchHitsSettingsTile(x, y)) {
-        showingSettingsMenu = true;
-        refreshDisplay(drawSettingsMenuScreen);
-        touch_loop_interval = millis() + 300;
-        return;
-    }
-
-    if (!showingClock && !showingCalculator && !showingSettings && !showingSettingsMenu && !showingContentSettings && !showingBookLibrary && !showingBookReader && !showingSdMenu && !showingSdFolder && touchHitsBookTile(x, y)) {
-        showingBookLibrary = true;
-        book_count = 0;
-        book_total = 0;
-        book_current_page = 1;
-        if (WiFi.status() != WL_CONNECTED) {
-            memset(framebuffer, 0xFF, EPD_WIDTH * EPD_HEIGHT / 2);
-            drawTopStatusBar();
-            drawPortraitTextCentered("wifi is not connected", 400, (GFXfont *)&FiraSans);
-            epd_poweron();
-            epd_clear();
-            epd_draw_grayscale_image(epd_full_screen(), framebuffer);
-            epd_poweroff();
-            delay(2000);
+    if (!showingClock && !showingCalculator && !showingSettings && !showingSettingsMenu && !showingContentSettings && !showingBookLibrary && !showingBookReader && !showingSdMenu && !showingSdFolder) {
+        if (touchHitsSettingsTile(x, y)) {
+            pressedHomeIcon = 1;
+            refreshDisplay(drawPortraitHome);
+            delay(350); // delay so user can see visual feedback
+            // Partial wipe only the bolded settings icon area before jumping
+            wipeHomeIconArea(1);
+            pressedHomeIcon = 0;
+            showingSettingsMenu = true;
+            refreshDisplay(drawSettingsMenuScreen);
+            touch_loop_interval = millis() + 300;
+            return;
         }
-        fetchBookLibrary();
-        refreshDisplay(drawBookLibraryScreen);
-        touch_loop_interval = millis() + 300;
-        return;
-    }
 
-    if (!showingClock && !showingCalculator && !showingSettings && !showingSettingsMenu && !showingContentSettings && !showingBookLibrary && !showingBookReader && !showingSdMenu && !showingSdFolder && touchHitsCalculatorTile(x, y)) {
-        showingCalculator = true;
-        refreshDisplay(drawCalculatorScreen);
-        touch_loop_interval = millis() + 300;
-        return;
-    }
+        if (touchHitsBookTile(x, y)) {
+            pressedHomeIcon = 2;
+            refreshDisplay(drawPortraitHome);
+            delay(350); // delay so user can see visual feedback
+            // Partial wipe only the bolded book icon area before jumping
+            wipeHomeIconArea(2);
+            pressedHomeIcon = 0;
+            showingBookLibrary = true;
+            book_count = 0;
+            book_total = 0;
+            book_current_page = 1;
+            if (WiFi.status() != WL_CONNECTED) {
+                memset(framebuffer, 0xFF, EPD_WIDTH * EPD_HEIGHT / 2);
+                drawTopStatusBar();
+                drawPortraitTextCentered("wifi is not connected", 400, (GFXfont *)&FiraSans);
+                epd_poweron();
+                epd_clear();
+                epd_draw_grayscale_image(epd_full_screen(), framebuffer);
+                epd_poweroff();
+                delay(2000);
+            }
+            fetchBookLibrary();
+            refreshDisplay(drawBookLibraryScreen);
+            touch_loop_interval = millis() + 300;
+            return;
+        }
 
-    if (!showingClock && !showingCalculator && !showingSettings && !showingSettingsMenu && !showingContentSettings && !showingBookLibrary && !showingBookReader && !showingSdMenu && !showingSdFolder && touchHitsClockTile(x, y)) {
-        showingClock = true;
-        clock_weather.loaded = false;
-        snprintf(clock_weather.city, sizeof(clock_weather.city), "Shenzhen");
-        snprintf(clock_weather.status, sizeof(clock_weather.status), "Syncing clock/weather...");
-        refreshDisplay(drawAnalogClockScreen);
-        time_t now = time(NULL);
-        struct tm timeinfo;
-        if (now >= 100000 && localtime_r(&now, &timeinfo)) {
-            clock_refresh_interval = millis() + millisUntilNextMinute(timeinfo);
-        } else {
-            clock_refresh_interval = millis() + 60000;
+        if (touchHitsVoiceStoryTile(x, y)) {
+            pressedHomeIcon = 3;
+            refreshDisplay(drawPortraitHome);
+            delay(350); // delay so user can see visual feedback
+            wipeHomeIconArea(3);
+            pressedHomeIcon = 0;
+            showingVoiceStoryLibrary = true;
+            story_count = 0;
+            story_total = 0;
+            story_current_page = 1;
+            if (WiFi.status() != WL_CONNECTED) {
+                memset(framebuffer, 0xFF, EPD_WIDTH * EPD_HEIGHT / 2);
+                drawTopStatusBar();
+                drawPortraitTextCentered("wifi is not connected", 400, (GFXfont *)&FiraSans);
+                epd_poweron();
+                epd_clear();
+                epd_draw_grayscale_image(epd_full_screen(), framebuffer);
+                epd_poweroff();
+                delay(2000);
+            }
+            fetchVoiceStoryLibrary();
+            refreshDisplay(drawVoiceStoryLibraryScreen);
+            touch_loop_interval = millis() + 300;
+            return;
         }
-        if (fetchClockWeatherInfo() && showingClock) {
-            refreshClockInfoArea();
-        } else if (showingClock) {
-            refreshClockInfoArea();
+
+        if (touchHitsMusicTile(x, y)) {
+            pressedHomeIcon = 6;
+            refreshDisplay(drawPortraitHome);
+            delay(350); // delay so user can see visual feedback
+            // Partial wipe only the bolded music icon area
+            wipeHomeIconArea(6);
+            pressedHomeIcon = 0;
+            // No subpage yet, stay on home page and redraw it thin
+            refreshDisplay(drawPortraitHome);
+            touch_loop_interval = millis() + 300;
+            return;
         }
-        touch_loop_interval = millis() + 300;
-        return;
+
+        if (touchHitsCalculatorTile(x, y)) {
+            pressedHomeIcon = 4;
+            refreshDisplay(drawPortraitHome);
+            delay(350); // delay so user can see visual feedback
+            // Partial wipe only the bolded calculator icon area before jumping
+            wipeHomeIconArea(4);
+            pressedHomeIcon = 0;
+            showingCalculator = true;
+            refreshDisplay(drawCalculatorScreen);
+            touch_loop_interval = millis() + 300;
+            return;
+        }
+
+        if (touchHitsCalculatorTile(x, y)) {
+            pressedHomeIcon = 4;
+            refreshDisplay(drawPortraitHome);
+            delay(350); // delay so user can see visual feedback
+            // Partial wipe only the bolded calculator icon area before jumping
+            wipeHomeIconArea(4);
+            pressedHomeIcon = 0;
+            showingCalculator = true;
+            refreshDisplay(drawCalculatorScreen);
+            touch_loop_interval = millis() + 300;
+            return;
+        }
+
+        if (touchHitsClockTile(x, y)) {
+            pressedHomeIcon = 5;
+            refreshDisplay(drawPortraitHome);
+            delay(350); // delay so user can see visual feedback
+            // Partial wipe only the bolded clock icon area before jumping
+            wipeHomeIconArea(5);
+            pressedHomeIcon = 0;
+            showingClock = true;
+            clock_weather.loaded = false;
+            snprintf(clock_weather.city, sizeof(clock_weather.city), "Shenzhen");
+            snprintf(clock_weather.status, sizeof(clock_weather.status), "Syncing clock/weather...");
+            refreshDisplay(drawAnalogClockScreen);
+            time_t now = time(NULL);
+            struct tm timeinfo;
+            if (now >= 100000 && localtime_r(&now, &timeinfo)) {
+                clock_refresh_interval = millis() + millisUntilNextMinute(timeinfo);
+            } else {
+                clock_refresh_interval = millis() + 60000;
+            }
+            if (fetchClockWeatherInfo() && showingClock) {
+                refreshClockInfoArea();
+            } else if (showingClock) {
+                refreshClockInfoArea();
+            }
+            touch_loop_interval = millis() + 300;
+            return;
+        }
     }
 
     if (!showingSettings && !showingSettingsMenu && !showingContentSettings && !showingSdMenu && !showingSdFolder && touchHitsWifiStatusIcon(x, y)) {
@@ -5332,6 +6015,457 @@ static bool fetchBookLibrary()
     return true;
 }
 
+// Voice Stories Core functions
+static void buildVoiceStoriesApiUrl(char *out, size_t outSize)
+{
+    if (!out || outSize == 0) {
+        return;
+    }
+    out[0] = '\0';
+
+    const char *base = saved_content_url[0] != '\0' ? saved_content_url : content_url_input;
+    if (!base || base[0] == '\0') {
+        return;
+    }
+
+    char normalized[256];
+    snprintf(normalized, sizeof(normalized), "%s", base);
+    size_t len = strlen(normalized);
+    while (len > 0 && normalized[len - 1] == '/') {
+        normalized[len - 1] = '\0';
+        --len;
+    }
+
+    char *query = strchr(normalized, '?');
+    if (query) {
+        *query = '\0';
+    }
+
+    snprintf(out, outSize, "%s/api/voice-stories?page=%ld&perPage=%d", normalized, (long)story_current_page, MAX_STORY_ITEMS);
+}
+
+static void buildVoiceStoryDetailApiUrl(char *out, size_t outSize, int32_t storyId)
+{
+    if (!out || outSize == 0) {
+        return;
+    }
+    out[0] = '\0';
+
+    const char *base = saved_content_url[0] != '\0' ? saved_content_url : content_url_input;
+    if (!base || base[0] == '\0' || storyId <= 0) {
+        return;
+    }
+
+    char normalized[256];
+    snprintf(normalized, sizeof(normalized), "%s", base);
+    size_t len = strlen(normalized);
+    while (len > 0 && normalized[len - 1] == '/') {
+        normalized[len - 1] = '\0';
+        --len;
+    }
+
+    char *query = strchr(normalized, '?');
+    if (query) {
+        *query = '\0';
+    }
+
+    snprintf(out, outSize, "%s/api/voice-stories/%ld", normalized, (long)storyId);
+}
+
+static bool isStorySavedOnSd(int32_t storyId)
+{
+    if (!ensureSdReady()) {
+        return false;
+    }
+    char path[64];
+    snprintf(path, sizeof(path), "%s/%ld/meta.txt", STORY_SD_FOLDER, (long)storyId);
+    return SD.exists(path);
+}
+
+static bool saveStoryToSd(int32_t storyId, const char *title, const char *author, const char *category, const char *content)
+{
+    if (!ensureSdReady()) {
+        return false;
+    }
+    
+    if (!SD.exists(STORY_SD_FOLDER)) {
+        SD.mkdir(STORY_SD_FOLDER);
+    }
+
+    char dirPath[32];
+    snprintf(dirPath, sizeof(dirPath), "%s/%ld", STORY_SD_FOLDER, (long)storyId);
+    if (!SD.exists(dirPath)) {
+        SD.mkdir(dirPath);
+    }
+    
+    // Save metadata
+    char metaPath[64];
+    snprintf(metaPath, sizeof(metaPath), "%s/meta.txt", dirPath);
+    if (SD.exists(metaPath)) {
+        SD.remove(metaPath);
+    }
+    File metaFile = SD.open(metaPath, FILE_WRITE);
+    if (!metaFile) {
+        Serial.println("Failed to open story meta file for writing");
+        return false;
+    }
+    metaFile.printf("%ld\n%s\n%s\n%s\n", (long)storyId, title, author, category);
+    metaFile.close();
+    
+    // Save content
+    char contentPath[64];
+    snprintf(contentPath, sizeof(contentPath), "%s/content.txt", dirPath);
+    if (SD.exists(contentPath)) {
+        SD.remove(contentPath);
+    }
+    File contentFile = SD.open(contentPath, FILE_WRITE);
+    if (!contentFile) {
+        Serial.println("Failed to open story content file for writing");
+        return false;
+    }
+    contentFile.print(content);
+    contentFile.close();
+    
+    Serial.printf("Story %ld saved to SD card\n", (long)storyId);
+    return true;
+}
+
+static bool loadStoryFromSd(int32_t storyId, char *title, char *author, char *category, String *content)
+{
+    if (!ensureSdReady()) {
+        return false;
+    }
+    
+    char dirPath[32];
+    snprintf(dirPath, sizeof(dirPath), "%s/%ld", STORY_SD_FOLDER, (long)storyId);
+    
+    // Load metadata
+    char metaPath[64];
+    snprintf(metaPath, sizeof(metaPath), "%s/meta.txt", dirPath);
+    File metaFile = SD.open(metaPath, FILE_READ);
+    if (!metaFile) {
+        return false;
+    }
+    
+    // Skip ID line
+    metaFile.readStringUntil('\n');
+    // Read title
+    String t = metaFile.readStringUntil('\n');
+    t.trim();
+    snprintf(title, 80, "%s", t.c_str());
+    // Read author
+    String a = metaFile.readStringUntil('\n');
+    a.trim();
+    snprintf(author, 40, "%s", a.c_str());
+    // Read category
+    String c = metaFile.readStringUntil('\n');
+    c.trim();
+    snprintf(category, 40, "%s", c.c_str());
+    metaFile.close();
+    
+    // Load content
+    char contentPath[64];
+    snprintf(contentPath, sizeof(contentPath), "%s/content.txt", dirPath);
+    File contentFile = SD.open(contentPath, FILE_READ);
+    if (!contentFile) {
+        return false;
+    }
+    *content = contentFile.readString();
+    contentFile.close();
+    
+    Serial.printf("Story %ld loaded from SD card\n", (long)storyId);
+    return true;
+}
+
+static bool loadSavedStoriesFromSd()
+{
+    if (!ensureSdReady()) {
+        return false;
+    }
+    
+    File storiesDir = SD.open(STORY_SD_FOLDER);
+    if (!storiesDir || !storiesDir.isDirectory()) {
+        return false;
+    }
+    
+    story_count = 0;
+    File entry = storiesDir.openNextFile();
+    while (entry && story_count < MAX_STORY_ITEMS) {
+        if (entry.isDirectory()) {
+            const char *entryName = entry.name();
+            const char *lastSlash = strrchr(entryName, '/');
+            int32_t storyId = atoi(lastSlash ? lastSlash + 1 : entryName);
+            if (storyId > 0) {
+                char title[80], author[40], category[40];
+                String content;
+                if (loadStoryFromSd(storyId, title, author, category, &content)) {
+                    story_items[story_count].id = storyId;
+                    snprintf(story_items[story_count].title, sizeof(story_items[story_count].title), "%s", title);
+                    snprintf(story_items[story_count].author, sizeof(story_items[story_count].author), "%s", author);
+                    snprintf(story_items[story_count].category, sizeof(story_items[story_count].category), "%s", category);
+                    story_items[story_count].saved = true;
+                    story_count++;
+                }
+            }
+        }
+        entry.close();
+        entry = storiesDir.openNextFile();
+    }
+    storiesDir.close();
+    
+    if (story_count > 0) {
+        snprintf(story_library_status, sizeof(story_library_status), "Loaded %d stories from SD", story_count);
+        return true;
+    }
+    return false;
+}
+
+static bool fetchVoiceStoryLibrary()
+{
+    if (WiFi.status() != WL_CONNECTED) {
+        if (loadSavedStoriesFromSd()) {
+            story_total = story_count;
+            return true;
+        }
+        snprintf(story_library_status, sizeof(story_library_status), "WiFi not connected");
+        return false;
+    }
+
+    warmupContentServer();
+
+    StoryListItem fetched_items[MAX_STORY_ITEMS];
+    int fetched_count = 0;
+    int fetched_total = story_total;
+
+    char url[320];
+    buildVoiceStoriesApiUrl(url, sizeof(url));
+    if (url[0] == '\0') {
+        snprintf(story_library_status, sizeof(story_library_status), "Set Content URL first");
+        return false;
+    }
+
+    String payload;
+    bool loaded = false;
+    for (int attempt = 1; attempt <= 3 && !loaded; ++attempt) {
+        snprintf(story_library_status, sizeof(story_library_status), "Stories try %d/3...", attempt);
+        Serial.printf("Fetching voice story library (try %d/3): %s\n", attempt, url);
+        loaded = httpGetString(url, payload, story_library_status, sizeof(story_library_status), 20000);
+        if (!loaded && attempt < 3) {
+            WiFiClient().stop();
+            delay(1200);
+        }
+    }
+    if (!loaded) {
+        return false;
+    }
+
+    JsonDocument doc;
+    DeserializationError err = deserializeJson(doc, payload);
+    if (err) {
+        snprintf(story_library_status, sizeof(story_library_status), "JSON parse failed");
+        Serial.printf("Story JSON parse failed: %s\n", err.c_str());
+        return false;
+    }
+
+    JsonArray items = doc["items"].as<JsonArray>();
+    fetched_total = doc["total"] | 0;
+    if (items.isNull()) {
+        snprintf(story_library_status, sizeof(story_library_status), "No items in JSON");
+        return false;
+    }
+
+    for (JsonObject item : items) {
+        if (fetched_count >= MAX_STORY_ITEMS) {
+            break;
+        }
+        StoryListItem &story = fetched_items[fetched_count];
+        story.id = item["id"] | 0;
+        copyBookTitle(story.title, sizeof(story.title), item);
+        copyJsonString(story.author, sizeof(story.author), item, "author", "");
+        copyJsonString(story.category, sizeof(story.category), item, "category", "");
+        story.saved = isStorySavedOnSd(story.id);
+        ++fetched_count;
+    }
+
+    if (fetched_count <= 0) {
+        snprintf(story_library_status, sizeof(story_library_status), "No stories found");
+        return false;
+    }
+
+    memcpy(story_items, fetched_items, sizeof(StoryListItem) * fetched_count);
+    story_count = fetched_count;
+    story_total = fetched_total;
+    snprintf(story_library_status, sizeof(story_library_status), "Loaded %d stories", story_count);
+    return true;
+}
+
+static bool fetchSelectedVoiceStory(int32_t storyId)
+{
+    if (loadStoryFromSd(storyId, selected_story_title, selected_story_author, selected_story_category, &selected_story_content)) {
+        selected_story_id = storyId;
+        story_reader_page = 0;
+        story_reader_total_pages = countBookReaderPagesByPixelWrap(selected_story_content.c_str());
+        snprintf(story_reader_status, sizeof(story_reader_status), "Loaded from SD");
+        Serial.printf("Loaded selected story %ld from SD cache\n", (long)storyId);
+        return true;
+    }
+
+    if (WiFi.status() != WL_CONNECTED) {
+        snprintf(story_reader_status, sizeof(story_reader_status), "WiFi not connected");
+        return false;
+    }
+
+    warmupContentServer();
+
+    char url[320];
+    buildVoiceStoryDetailApiUrl(url, sizeof(url), storyId);
+    if (url[0] == '\0') {
+        snprintf(story_reader_status, sizeof(story_reader_status), "Set Content URL first");
+        return false;
+    }
+
+    String payload;
+    bool loaded = false;
+    for (int attempt = 1; attempt <= 3 && !loaded; ++attempt) {
+        snprintf(story_reader_status, sizeof(story_reader_status), "Story try %d/3...", attempt);
+        Serial.printf("Fetching selected voice story (try %d/3): %s\n", attempt, url);
+        loaded = httpGetString(url, payload, story_reader_status, sizeof(story_reader_status), 20000);
+        if (!loaded && attempt < 3) {
+            WiFiClient().stop();
+            delay(1200);
+        }
+    }
+    if (!loaded) {
+        return false;
+    }
+
+    JsonDocument doc;
+    DeserializationError err = deserializeJson(doc, payload);
+    if (err) {
+        snprintf(story_reader_status, sizeof(story_reader_status), "Story JSON failed");
+        Serial.printf("Story detail JSON parse failed: %s\n", err.c_str());
+        return false;
+    }
+
+    JsonObject item = doc.as<JsonObject>();
+    selected_story_id = item["id"] | storyId;
+    copyBookTitle(selected_story_title, sizeof(selected_story_title), item);
+    copyJsonString(selected_story_author, sizeof(selected_story_author), item, "author", "");
+    copyJsonString(selected_story_category, sizeof(selected_story_category), item, "category", "");
+    const char *content = item["content"] | "";
+    selected_story_content = content;
+
+    story_reader_page = 0;
+    story_reader_total_pages = countBookReaderPagesByPixelWrap(selected_story_content.c_str());
+    snprintf(story_reader_status, sizeof(story_reader_status), "Loaded story");
+    return true;
+}
+
+static bool fetchAndSaveStoryItem(StoryListItem &story)
+{
+    if (WiFi.status() != WL_CONNECTED || story.id <= 0) {
+        return false;
+    }
+
+    warmupContentServer();
+
+    char url[320];
+    buildVoiceStoryDetailApiUrl(url, sizeof(url), story.id);
+    if (url[0] == '\0') {
+        return false;
+    }
+
+    String payload;
+    char status[96];
+    bool loaded = false;
+    for (int attempt = 1; attempt <= 3 && !loaded; ++attempt) {
+        Serial.printf("Saving story %ld in background (try %d/3): %s\n", (long)story.id, attempt, url);
+        loaded = httpGetString(url, payload, status, sizeof(status), 20000);
+        if (!loaded && attempt < 3) {
+            WiFiClient().stop();
+            delay(1200);
+        }
+    }
+    if (!loaded) {
+        Serial.printf("Failed to fetch story %ld for SD save: %s\n", (long)story.id, status);
+        return false;
+    }
+
+    JsonDocument doc;
+    DeserializationError err = deserializeJson(doc, payload);
+    if (err) {
+        Serial.printf("Save story JSON parse failed: %s\n", err.c_str());
+        return false;
+    }
+
+    JsonObject item = doc.as<JsonObject>();
+    char title[80];
+    char author[40];
+    char category[40];
+    copyBookTitle(title, sizeof(title), item);
+    copyJsonString(author, sizeof(author), item, "author", story.author);
+    copyJsonString(category, sizeof(category), item, "category", story.category);
+    const char *content = item["content"] | "";
+
+    if (!saveStoryToSd(story.id, title, author, category, content)) {
+        return false;
+    }
+
+    snprintf(story.title, sizeof(story.title), "%s", title);
+    snprintf(story.author, sizeof(story.author), "%s", author);
+    snprintf(story.category, sizeof(story.category), "%s", category);
+    return true;
+}
+
+static void queueSelectedStoryAutoSave()
+{
+    if (WiFi.status() != WL_CONNECTED || selected_story_id <= 0 || selected_story_content.length() == 0) {
+        return;
+    }
+    if (isStorySavedOnSd(selected_story_id)) {
+        for (int i = 0; i < story_count; ++i) {
+            if (story_items[i].id == selected_story_id) {
+                story_items[i].saved = true;
+                break;
+            }
+        }
+        return;
+    }
+
+    pending_story_auto_save = true;
+    pending_story_auto_save_id = selected_story_id;
+    pending_story_auto_save_after = millis() + 50;
+    Serial.printf("Queued story %ld for SD auto-save after display\n", (long)selected_story_id);
+}
+
+static void processPendingStoryAutoSave()
+{
+    if (!pending_story_auto_save || millis() < pending_story_auto_save_after) {
+        return;
+    }
+
+    const int32_t storyId = pending_story_auto_save_id;
+    pending_story_auto_save = false;
+    pending_story_auto_save_id = 0;
+
+    if (storyId <= 0 || selected_story_id != storyId || selected_story_content.length() == 0) {
+        return;
+    }
+
+    Serial.printf("Background SD auto-save for displayed story %ld\n", (long)storyId);
+    if (saveStoryToSd(storyId, selected_story_title, selected_story_author, selected_story_category, selected_story_content.c_str())) {
+        for (int i = 0; i < story_count; ++i) {
+            if (story_items[i].id == storyId) {
+                story_items[i].saved = true;
+                if (showingVoiceStoryLibrary) {
+                    refreshVoiceStorySaveIconArea(i);
+                }
+                break;
+            }
+        }
+    }
+}
+
 
 uint32_t pressed_cnt = 0;
 void buttonPressed(Button2 &b)
@@ -5490,6 +6624,7 @@ void setup()
 void loop()
 {
     processPendingBookAutoSave();
+    processPendingStoryAutoSave();
 
     if (contentServerWarmupPending && WiFi.status() == WL_CONNECTED) {
         contentServerWarmupPending = false;
@@ -5543,6 +6678,10 @@ void loop()
             refreshDisplayExtended(drawBookLibraryScreen, true);
         } else if (showingBookReader) {
             refreshDisplayExtended(drawBookReaderScreen, true);
+        } else if (showingVoiceStoryLibrary) {
+            refreshDisplayExtended(drawVoiceStoryLibraryScreen, true);
+        } else if (showingVoiceStoryReader) {
+            refreshDisplayExtended(drawVoiceStoryReaderScreen, true);
         } else if (showingSdMenu) {
             refreshDisplayExtended(drawSdMenuScreen, true);
         } else if (showingSdFolder) {
