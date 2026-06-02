@@ -6,6 +6,8 @@ const geoip = require('geoip-lite');
 const fs = require('fs');
 const http = require('http');
 const https = require('https');
+const crypto = require('crypto');
+const { spawn } = require('child_process');
 
 const app = express();
 const PORT = process.env.PORT || 3001;
@@ -24,6 +26,9 @@ const pool = new Pool({
 
 app.use(cors());
 app.use(express.json());
+
+const ttsCacheDir = path.join(__dirname, 'tts-cache');
+fs.mkdirSync(ttsCacheDir, { recursive: true });
 
 // Trust proxy headers - needed to get real client IP when behind a reverse proxy
 app.set('trust proxy', true);
@@ -270,6 +275,71 @@ app.get('/api/voice-stories/:id', async (req, res) => {
     res.json(rows[0]);
   } catch (err) {
     res.status(500).json({ error: err.message });
+  }
+});
+
+function normalizeTtsText(text) {
+  return String(text || '')
+    .replace(/\r/g, '\n')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, 12000);
+}
+
+function synthesizeOfflineWav(text, outPath) {
+  return new Promise((resolve, reject) => {
+    // Offline Windows TTS through System.Speech.  This keeps the ESP32 simple:
+    // it receives a normal WAV file and plays it through the MAX98357A I2S amp.
+    const script = `
+Add-Type -AssemblyName System.Speech
+$text = [Console]::In.ReadToEnd()
+$synth = New-Object System.Speech.Synthesis.SpeechSynthesizer
+try { $synth.SelectVoiceByHints([System.Speech.Synthesis.VoiceGender]::Female, [System.Speech.Synthesis.VoiceAge]::Child, 0, [System.Globalization.CultureInfo]::GetCultureInfo('zh-CN')) } catch {}
+$synth.Rate = -1
+$synth.Volume = 100
+$synth.SetOutputToWaveFile('${outPath.replace(/'/g, "''")}')
+$synth.Speak($text)
+$synth.Dispose()
+`;
+    const ps = spawn('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', script], {
+      windowsHide: true,
+      stdio: ['pipe', 'pipe', 'pipe']
+    });
+    let stderr = '';
+    ps.stderr.on('data', d => { stderr += d.toString(); });
+    ps.on('error', reject);
+    ps.on('close', code => {
+      if (code === 0 && fs.existsSync(outPath) && fs.statSync(outPath).size > 44) resolve();
+      else reject(new Error(stderr || `PowerShell TTS exited with code ${code}`));
+    });
+    ps.stdin.end(text);
+  });
+}
+
+// API: Offline TTS WAV for one voice story.  The file is generated once and
+// cached locally, so repeated ESP32 requests do not re-synthesize the story.
+app.get('/api/voice-stories/:id/tts', async (req, res) => {
+  try {
+    const { rows } = await pool.query('SELECT id, title, content FROM voice_stories WHERE id = $1', [req.params.id]);
+    if (rows.length === 0) return res.status(404).json({ error: 'Voice story not found' });
+
+    const story = rows[0];
+    const text = normalizeTtsText(`${story.title || ''}. ${story.content || ''}`);
+    if (!text) return res.status(400).json({ error: 'Story has no text to synthesize' });
+
+    const hash = crypto.createHash('sha1').update(`${story.id}\n${text}`).digest('hex').slice(0, 16);
+    const wavPath = path.join(ttsCacheDir, `voice-story-${story.id}-${hash}.wav`);
+    if (!fs.existsSync(wavPath)) {
+      console.log(`Generating offline TTS WAV for voice story ${story.id}: ${wavPath}`);
+      await synthesizeOfflineWav(text, wavPath);
+    }
+
+    res.setHeader('Content-Type', 'audio/wav');
+    res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
+    res.sendFile(wavPath);
+  } catch (err) {
+    console.error('Voice story TTS failed:', err);
+    res.status(500).json({ error: 'Offline TTS failed: ' + err.message });
   }
 });
 

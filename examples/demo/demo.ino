@@ -38,8 +38,15 @@
 #include <ArduinoJson.h>
 #include <AudioFileSourceSD.h>
 #include <AudioGeneratorMP3.h>
+#include <AudioGeneratorWAV.h>
 #include <AudioOutputI2S.h>
 #include <esp_sntp.h>
+#if USE_LOCAL_ESP_TTS
+extern "C" {
+#include "esp_tts.h"
+#include "esp_tts_voice_xiaole.h"
+}
+#endif
 #include "utilities.h"
 #include "calc_key_icons.h"
 #include "wifi_key_icons.h"
@@ -181,6 +188,7 @@ static constexpr int AUDIO_I2S_LRCK_PIN = 48;
 static constexpr int AUDIO_I2S_DOUT_PIN = 45;
 static constexpr int AUDIO_I2S_MIC_DIN_PIN = 10;
 AudioGeneratorMP3 *audioMp3 = nullptr;
+AudioGeneratorWAV *audioWav = nullptr;
 AudioFileSourceSD *audioFile = nullptr;
 AudioOutputI2S *audioOut = nullptr;
 char current_audio_path[128] = "";
@@ -332,6 +340,7 @@ static bool findWhiteRecoveryArea(Rect_t baseArea, const uint8_t *oldBuffer, con
 static bool findBlackDrawArea(Rect_t baseArea, const uint8_t *oldBuffer, const uint8_t *newBuffer, Rect_t *drawArea);
 static bool fetchSelectedBook(int32_t bookId);
 static bool fetchSelectedVoiceStory(int32_t storyId);
+static bool prepareAndStartStoryAudio(int32_t storyId);
 static bool fetchMusicLibrary();
 static bool fetchSelectedMusic(int32_t songId);
 static bool saveMusicToSd(int32_t songId, const char *title, const char *filename, const char *audioUrl, const char *source);
@@ -348,8 +357,11 @@ static void buildMusicApiUrl(char *out, size_t outSize);
 static void buildMusicDetailApiUrl(char *out, size_t outSize, int32_t songId);
 static bool buildMusicAudioDownloadUrl(const char *audioUrl, char *out, size_t outSize);
 static bool handleMusicPlayerTouch(int16_t tx, int16_t ty);
+static bool synthesizeStoryTtsToSd(int32_t storyId, const char *text, char *audioPath, size_t audioPathSize);
+static bool writeWavHeader(File &file, uint32_t dataBytes, uint32_t sampleRate, uint16_t channels, uint16_t bitsPerSample);
 static void buildBookDetailApiUrl(char *out, size_t outSize, int32_t bookId);
 static void buildVoiceStoryDetailApiUrl(char *out, size_t outSize, int32_t storyId);
+static void buildVoiceStoryTtsApiUrl(char *out, size_t outSize, int32_t storyId);
 static void buildContentApiUrl(char *out, size_t outSize, const char *endpoint, const char *query = NULL);
 static bool httpGetString(const char *url, String &payload, char *status, size_t statusSize, uint32_t timeoutMs = 10000);
 static bool httpDownloadToSdFile(const char *url, const char *path, char *status, size_t statusSize, uint32_t timeoutMs = 60000);
@@ -3189,7 +3201,7 @@ static bool handleVoiceStoryReaderTouch(int16_t tx, int16_t ty)
         snprintf(story_reader_status, sizeof(story_reader_status), "Loading story...");
         refreshVoiceStoryPlayerHeaderArea();
         if (selected_story_id > 0 && fetchSelectedVoiceStory(selected_story_id)) {
-            story_playing = true;
+            story_playing = prepareAndStartStoryAudio(selected_story_id);
             // Loading from the player button changes only the player/title
             // header; keep the visible story list below untouched.
             refreshVoiceStoryPlayerHeaderArea();
@@ -3200,7 +3212,12 @@ static bool handleVoiceStoryReaderTouch(int16_t tx, int16_t ty)
         return true;
     }
 
-    story_playing = !story_playing;
+    if (story_playing) {
+        stopAudioPlayback();
+        story_playing = false;
+    } else {
+        story_playing = prepareAndStartStoryAudio(selected_story_id);
+    }
     snprintf(story_reader_status, sizeof(story_reader_status), "%s", story_playing ? "正在播放" : "已暂停");
     refreshVoiceStoryPlayerHeaderArea();
     return true;
@@ -5493,7 +5510,7 @@ static void processTouchRelease(int16_t startX, int16_t startY, int16_t endX, in
                     }
                 }
 
-                story_playing = selected_story_content.length() > 0;
+                story_playing = selected_story_content.length() > 0 && prepareAndStartStoryAudio(selected_story_id);
                 refreshVoiceStoryPlayerHeaderArea();
                 if (story_playing) {
                     queueSelectedStoryAutoSave();
@@ -5532,7 +5549,7 @@ static void processTouchRelease(int16_t startX, int16_t startY, int16_t endX, in
 
             refreshVoiceStoryPlayerHeaderArea();
             if (fetchSelectedVoiceStory(selected_story_id)) {
-                story_playing = true;
+                story_playing = prepareAndStartStoryAudio(selected_story_id);
                 refreshVoiceStoryPlayerHeaderArea();
                 queueSelectedStoryAutoSave();
             } else {
@@ -6865,6 +6882,252 @@ static void buildVoiceStoryDetailApiUrl(char *out, size_t outSize, int32_t story
     snprintf(out, outSize, "%s/api/voice-stories/%ld", normalized, (long)storyId);
 }
 
+static void buildVoiceStoryTtsApiUrl(char *out, size_t outSize, int32_t storyId)
+{
+    if (!out || outSize == 0) return;
+    out[0] = '\0';
+    if (storyId <= 0) return;
+    char endpoint[64];
+    snprintf(endpoint, sizeof(endpoint), "/api/voice-stories/%ld/tts", (long)storyId);
+    buildContentApiUrl(out, outSize, endpoint, NULL);
+}
+
+static bool loadStoryAudioFromSd(int32_t storyId, char *audioPath, size_t audioPathSize)
+{
+    if (!audioPath || audioPathSize == 0 || !ensureSdReady() || storyId <= 0) return false;
+    char path[80];
+    snprintf(path, sizeof(path), "%s/%ld/tts.wav", STORY_SD_FOLDER, (long)storyId);
+    if (!SD.exists(path)) return false;
+    snprintf(audioPath, audioPathSize, "%s", path);
+    return true;
+}
+
+static void writeLe16(File &file, uint16_t value)
+{
+    uint8_t b[2] = {(uint8_t)(value & 0xFF), (uint8_t)((value >> 8) & 0xFF)};
+    file.write(b, sizeof(b));
+}
+
+static void writeLe32(File &file, uint32_t value)
+{
+    uint8_t b[4] = {
+        (uint8_t)(value & 0xFF),
+        (uint8_t)((value >> 8) & 0xFF),
+        (uint8_t)((value >> 16) & 0xFF),
+        (uint8_t)((value >> 24) & 0xFF)};
+    file.write(b, sizeof(b));
+}
+
+static bool writeWavHeader(File &file, uint32_t dataBytes, uint32_t sampleRate, uint16_t channels, uint16_t bitsPerSample)
+{
+    if (!file) return false;
+    const uint32_t byteRate = sampleRate * channels * bitsPerSample / 8;
+    const uint16_t blockAlign = channels * bitsPerSample / 8;
+
+    file.write((const uint8_t *)"RIFF", 4);
+    writeLe32(file, 36 + dataBytes);
+    file.write((const uint8_t *)"WAVE", 4);
+    file.write((const uint8_t *)"fmt ", 4);
+    writeLe32(file, 16);
+    writeLe16(file, 1); // PCM
+    writeLe16(file, channels);
+    writeLe32(file, sampleRate);
+    writeLe32(file, byteRate);
+    writeLe16(file, blockAlign);
+    writeLe16(file, bitsPerSample);
+    file.write((const uint8_t *)"data", 4);
+    writeLe32(file, dataBytes);
+    return true;
+}
+
+static bool appendTtsChunkToWav(esp_tts_handle_t ttsHandle, const char *chunk, File &wavFile, uint32_t *dataBytes)
+{
+    if (!ttsHandle || !chunk || chunk[0] == '\0' || !dataBytes) {
+        return false;
+    }
+
+    if (!esp_tts_parse_chinese(ttsHandle, chunk)) {
+        Serial.printf("esp_tts_parse_chinese failed for chunk: %.48s\n", chunk);
+        esp_tts_stream_reset(ttsHandle);
+        return false;
+    }
+
+    while (true) {
+        int len = 0;
+        short *pcm = esp_tts_stream_play(ttsHandle, &len, 4);
+        if (!pcm || len <= 0) {
+            break;
+        }
+        const size_t bytes = (size_t)len * sizeof(short);
+        wavFile.write((const uint8_t *)pcm, bytes);
+        *dataBytes += bytes;
+        delay(1);
+    }
+    esp_tts_stream_reset(ttsHandle);
+    return true;
+}
+
+static bool synthesizeStoryTtsToSd(int32_t storyId, const char *text, char *audioPath, size_t audioPathSize)
+{
+#if USE_LOCAL_ESP_TTS
+    if (!audioPath || audioPathSize == 0 || storyId <= 0 || !text || text[0] == '\0' || !ensureSdReady()) {
+        return false;
+    }
+
+    if (loadStoryAudioFromSd(storyId, audioPath, audioPathSize)) {
+        return true;
+    }
+
+    if (!SD.exists(STORY_SD_FOLDER)) SD.mkdir(STORY_SD_FOLDER);
+    char dirPath[32];
+    snprintf(dirPath, sizeof(dirPath), "%s/%ld", STORY_SD_FOLDER, (long)storyId);
+    if (!SD.exists(dirPath)) SD.mkdir(dirPath);
+
+    char path[80];
+    snprintf(path, sizeof(path), "%s/tts.wav", dirPath);
+    if (SD.exists(path)) SD.remove(path);
+
+    snprintf(story_reader_status, sizeof(story_reader_status), "本机语音生成...");
+    Serial.printf("Generating local esp-tts WAV for story %ld -> %s\n", (long)storyId, path);
+
+    esp_tts_voice_t *ttsVoice = esp_tts_voice_set_init(&esp_tts_voice_xiaole, NULL);
+    if (!ttsVoice) {
+        snprintf(story_reader_status, sizeof(story_reader_status), "TTS voice failed");
+        return false;
+    }
+
+    esp_tts_handle_t ttsHandle = esp_tts_create(ttsVoice);
+    if (!ttsHandle) {
+        esp_tts_voice_set_free(ttsVoice);
+        snprintf(story_reader_status, sizeof(story_reader_status), "TTS init failed");
+        return false;
+    }
+
+    File wavFile = SD.open(path, FILE_WRITE);
+    if (!wavFile) {
+        esp_tts_destroy(ttsHandle);
+        esp_tts_voice_set_free(ttsVoice);
+        snprintf(story_reader_status, sizeof(story_reader_status), "SD open failed");
+        return false;
+    }
+
+    const uint32_t sampleRate = esp_tts_voice_xiaole.sample_rate > 0 ? (uint32_t)esp_tts_voice_xiaole.sample_rate : 16000;
+    writeWavHeader(wavFile, 0, sampleRate, 1, 16);
+
+    uint32_t dataBytes = 0;
+    const char *p = text;
+    char chunk[520];
+    size_t chunkLen = 0;
+    bool generatedAny = false;
+
+    while (*p) {
+        const char *cpStart = p;
+        uint32_t cp = 0;
+        if (!utf8NextCodepoint(&p, &cp)) break;
+        size_t cpBytes = (size_t)(p - cpStart);
+
+        bool boundary = (cp == '\n' || cp == '\r' || cp == 0x3002 || cp == 0xFF01 || cp == 0xFF1F || cp == 0xFF1B || cp == 0xFF0C || cp == ',' || cp == '.' || cp == '!' || cp == '?' || cp == ';');
+        if (cp == '\r') continue;
+
+        if (chunkLen + cpBytes >= sizeof(chunk) - 1) {
+            chunk[chunkLen] = '\0';
+            generatedAny = appendTtsChunkToWav(ttsHandle, chunk, wavFile, &dataBytes) || generatedAny;
+            chunkLen = 0;
+        }
+
+        if (cp != '\n') {
+            memcpy(chunk + chunkLen, cpStart, cpBytes);
+            chunkLen += cpBytes;
+            chunk[chunkLen] = '\0';
+        }
+
+        if (boundary && chunkLen > 0) {
+            chunk[chunkLen] = '\0';
+            generatedAny = appendTtsChunkToWav(ttsHandle, chunk, wavFile, &dataBytes) || generatedAny;
+            chunkLen = 0;
+        }
+    }
+
+    if (chunkLen > 0) {
+        chunk[chunkLen] = '\0';
+        generatedAny = appendTtsChunkToWav(ttsHandle, chunk, wavFile, &dataBytes) || generatedAny;
+    }
+
+    wavFile.seek(0);
+    writeWavHeader(wavFile, dataBytes, sampleRate, 1, 16);
+    wavFile.close();
+    esp_tts_destroy(ttsHandle);
+    esp_tts_voice_set_free(ttsVoice);
+
+    if (!generatedAny || dataBytes == 0) {
+        SD.remove(path);
+        snprintf(story_reader_status, sizeof(story_reader_status), "TTS failed");
+        return false;
+    }
+
+    Serial.printf("Local esp-tts WAV generated: %s, %lu bytes PCM, %lu Hz\n", path, (unsigned long)dataBytes, (unsigned long)sampleRate);
+    snprintf(audioPath, audioPathSize, "%s", path);
+    return true;
+#else
+    (void)storyId;
+    (void)text;
+    (void)audioPath;
+    (void)audioPathSize;
+    return false;
+#endif
+}
+
+static bool downloadStoryAudioToSd(int32_t storyId, char *audioPath, size_t audioPathSize)
+{
+    if (!audioPath || audioPathSize == 0 || storyId <= 0 || !ensureSdReady()) return false;
+    if (loadStoryAudioFromSd(storyId, audioPath, audioPathSize)) return true;
+    if (WiFi.status() != WL_CONNECTED) {
+        snprintf(story_reader_status, sizeof(story_reader_status), "WiFi not connected");
+        return false;
+    }
+
+    if (!SD.exists(STORY_SD_FOLDER)) SD.mkdir(STORY_SD_FOLDER);
+    char dirPath[32];
+    snprintf(dirPath, sizeof(dirPath), "%s/%ld", STORY_SD_FOLDER, (long)storyId);
+    if (!SD.exists(dirPath)) SD.mkdir(dirPath);
+
+    char url[320];
+    buildVoiceStoryTtsApiUrl(url, sizeof(url), storyId);
+    if (url[0] == '\0') {
+        snprintf(story_reader_status, sizeof(story_reader_status), "Set Content URL first");
+        return false;
+    }
+
+    char path[80];
+    snprintf(path, sizeof(path), "%s/tts.wav", dirPath);
+    if (SD.exists(path)) SD.remove(path);
+
+    char status[96];
+    snprintf(story_reader_status, sizeof(story_reader_status), "生成离线语音...");
+    Serial.printf("Downloading story TTS WAV %ld: %s -> %s\n", (long)storyId, url, path);
+    if (!httpDownloadToSdFile(url, path, status, sizeof(status), 180000)) {
+        Serial.printf("Story TTS download failed: %s\n", status);
+        snprintf(story_reader_status, sizeof(story_reader_status), "%s", status);
+        if (SD.exists(path)) SD.remove(path);
+        return false;
+    }
+
+    snprintf(audioPath, audioPathSize, "%s", path);
+    return true;
+}
+
+static bool prepareAndStartStoryAudio(int32_t storyId)
+{
+    char audioPath[128];
+    if (!synthesizeStoryTtsToSd(storyId, selected_story_content.c_str(), audioPath, sizeof(audioPath)) &&
+        !downloadStoryAudioToSd(storyId, audioPath, sizeof(audioPath))) {
+        return false;
+    }
+    bool ok = startAudioPlayback(audioPath);
+    snprintf(story_reader_status, sizeof(story_reader_status), "%s", ok ? "正在播放" : "Play failed");
+    return ok;
+}
+
 static bool isStorySavedOnSd(int32_t storyId)
 {
     if (!ensureSdReady()) {
@@ -7490,6 +7753,13 @@ static void initAudioOutput()
 
 static void stopAudioPlayback()
 {
+    if (audioWav) {
+        if (audioWav->isRunning()) {
+            audioWav->stop();
+        }
+        delete audioWav;
+        audioWav = nullptr;
+    }
     if (audioMp3) {
         if (audioMp3->isRunning()) {
             audioMp3->stop();
@@ -7521,33 +7791,49 @@ static bool startAudioPlayback(const char *path)
 
     stopAudioPlayback();
     audioFile = new AudioFileSourceSD(path);
-    audioMp3 = new AudioGeneratorMP3();
-    if (!audioFile || !audioMp3) {
-        Serial.println("MP3 decoder allocation failed");
+    const char *dot = strrchr(path, '.');
+    const bool isWav = dot && strcasecmp(dot, ".wav") == 0;
+    if (isWav) {
+        audioWav = new AudioGeneratorWAV();
+    } else {
+        audioMp3 = new AudioGeneratorMP3();
+    }
+    if (!audioFile || (!audioMp3 && !audioWav)) {
+        Serial.println("Audio decoder allocation failed");
         stopAudioPlayback();
         return false;
     }
 
-    if (!audioMp3->begin(audioFile, audioOut)) {
-        Serial.printf("MP3 begin failed: %s\n", path);
+    bool began = isWav ? audioWav->begin(audioFile, audioOut) : audioMp3->begin(audioFile, audioOut);
+    if (!began) {
+        Serial.printf("Audio begin failed: %s\n", path);
         stopAudioPlayback();
         return false;
     }
 
     snprintf(current_audio_path, sizeof(current_audio_path), "%s", path);
-    Serial.printf("MP3 playback started: %s\n", current_audio_path);
+    Serial.printf("Audio playback started: %s\n", current_audio_path);
     return true;
 }
 
 static void serviceAudioPlayback()
 {
-    if (!audioMp3 || !audioMp3->isRunning()) {
+    bool running = (audioMp3 && audioMp3->isRunning()) || (audioWav && audioWav->isRunning());
+    if (!running) {
         return;
     }
 
-    if (!audioMp3->loop()) {
-        Serial.println("MP3 playback finished");
+    bool ok = audioMp3 ? audioMp3->loop() : audioWav->loop();
+    if (!ok) {
+        Serial.println("Audio playback finished");
         stopAudioPlayback();
+        if (story_playing) {
+            story_playing = false;
+            snprintf(story_reader_status, sizeof(story_reader_status), "播放结束");
+            if (showingVoiceStoryReader) {
+                refreshVoiceStoryPlayerHeaderArea();
+            }
+        }
         if (music_playing) {
             music_playing = false;
             snprintf(music_player_status, sizeof(music_player_status), "播放结束");
