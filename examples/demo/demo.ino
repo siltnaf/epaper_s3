@@ -36,6 +36,9 @@
 #include <HTTPClient.h>
 #include <Preferences.h>
 #include <ArduinoJson.h>
+#include <AudioFileSourceSD.h>
+#include <AudioGeneratorMP3.h>
+#include <AudioOutputI2S.h>
 #include <esp_sntp.h>
 #include "utilities.h"
 #include "calc_key_icons.h"
@@ -167,6 +170,20 @@ bool pending_story_auto_save = false;
 int32_t pending_story_auto_save_id = 0;
 uint32_t pending_story_auto_save_after = 0;
 bool story_playing = false;
+
+// I2S audio wiring confirmed by user:
+// ESP32-S3 GPIO39 -> MAX98357A BCLK + INMP441 SCK
+// ESP32-S3 GPIO48 -> MAX98357A LRC  + INMP441 WS
+// ESP32-S3 GPIO45 -> MAX98357A DIN
+// ESP32-S3 GPIO10 -> INMP441 SD (reserved for future microphone input)
+static constexpr int AUDIO_I2S_BCLK_PIN = 39;
+static constexpr int AUDIO_I2S_LRCK_PIN = 48;
+static constexpr int AUDIO_I2S_DOUT_PIN = 45;
+static constexpr int AUDIO_I2S_MIC_DIN_PIN = 10;
+AudioGeneratorMP3 *audioMp3 = nullptr;
+AudioFileSourceSD *audioFile = nullptr;
+AudioOutputI2S *audioOut = nullptr;
+char current_audio_path[128] = "";
 
 #define MAX_MUSIC_ITEMS 10
 struct MusicListItem {
@@ -323,6 +340,10 @@ static bool loadMusicFromSd(int32_t songId, char *title, char *filename, char *a
 static bool loadSavedMusicFromSd();
 static bool fetchAndSaveMusicItem(MusicListItem &song);
 static void refreshMusicSaveIconArea(int musicIndex);
+static void initAudioOutput();
+static void stopAudioPlayback();
+static bool startAudioPlayback(const char *path);
+static void serviceAudioPlayback();
 static void buildMusicApiUrl(char *out, size_t outSize);
 static void buildMusicDetailApiUrl(char *out, size_t outSize, int32_t songId);
 static bool buildMusicAudioDownloadUrl(const char *audioUrl, char *out, size_t outSize);
@@ -5322,6 +5343,7 @@ static void processTouchRelease(int16_t startX, int16_t startY, int16_t endX, in
         showingMusicPlayer = false;
         story_playing = false;
         music_playing = false;
+        stopAudioPlayback();
         showingSdMenu = false;
         showingSdFolder = false;
         show_password_prompt = false;
@@ -5566,7 +5588,7 @@ static void processTouchRelease(int16_t startX, int16_t startY, int16_t endX, in
                 showingMusicPlayer = true;
                 refreshMusicPlayerHeaderArea();
                 fetchSelectedMusic(selected_music_id);
-                music_playing = selected_music_url[0] != '\0';
+                music_playing = startAudioPlayback(selected_music_url);
                 snprintf(music_player_status, sizeof(music_player_status), "%s", music_playing ? "正在播放" : "Load failed");
                 refreshMusicPlayerHeaderArea();
                 touch_loop_interval = millis() + 300;
@@ -5585,6 +5607,7 @@ static void processTouchRelease(int16_t startX, int16_t startY, int16_t endX, in
                 break;
             }
             music_playing = false;
+            stopAudioPlayback();
             selected_music_id = music_items[i].id;
             snprintf(selected_music_title, sizeof(selected_music_title), "%s", music_items[i].title);
             snprintf(selected_music_filename, sizeof(selected_music_filename), "%s", music_items[i].filename);
@@ -5593,7 +5616,7 @@ static void processTouchRelease(int16_t startX, int16_t startY, int16_t endX, in
             music_player_status[0] = '\0';
             refreshMusicPlayerHeaderArea();
             fetchSelectedMusic(selected_music_id);
-            music_playing = selected_music_url[0] != '\0';
+            music_playing = startAudioPlayback(selected_music_url);
             snprintf(music_player_status, sizeof(music_player_status), "%s", music_playing ? "正在播放" : "Load failed");
             refreshMusicPlayerHeaderArea();
             touch_loop_interval = millis() + 300;
@@ -5797,6 +5820,7 @@ static void processTouchRelease(int16_t startX, int16_t startY, int16_t endX, in
         showingMusicLibrary = false;
         showingMusicPlayer = false;
         music_playing = false;
+        stopAudioPlayback();
         showingSdMenu = false;
         showingSdFolder = false;
         show_password_prompt = false;
@@ -7443,6 +7467,97 @@ static bool loadSavedMusicFromSd()
     return false;
 }
 
+static void initAudioOutput()
+{
+    if (audioOut) {
+        return;
+    }
+
+    audioOut = new AudioOutputI2S();
+    if (!audioOut) {
+        Serial.println("AudioOutputI2S allocation failed");
+        return;
+    }
+
+    audioOut->SetPinout(AUDIO_I2S_BCLK_PIN, AUDIO_I2S_LRCK_PIN, AUDIO_I2S_DOUT_PIN);
+    audioOut->SetGain(0.65f);
+    Serial.printf("I2S audio initialized: BCLK=%d LRCK=%d DOUT=%d MIC_DIN=%d\n",
+                  AUDIO_I2S_BCLK_PIN,
+                  AUDIO_I2S_LRCK_PIN,
+                  AUDIO_I2S_DOUT_PIN,
+                  AUDIO_I2S_MIC_DIN_PIN);
+}
+
+static void stopAudioPlayback()
+{
+    if (audioMp3) {
+        if (audioMp3->isRunning()) {
+            audioMp3->stop();
+        }
+        delete audioMp3;
+        audioMp3 = nullptr;
+    }
+    if (audioFile) {
+        delete audioFile;
+        audioFile = nullptr;
+    }
+    current_audio_path[0] = '\0';
+}
+
+static bool startAudioPlayback(const char *path)
+{
+    if (!path || path[0] == '\0') {
+        return false;
+    }
+    if (!ensureSdReady() || !SD.exists(path)) {
+        Serial.printf("Audio file not found: %s\n", path);
+        return false;
+    }
+
+    initAudioOutput();
+    if (!audioOut) {
+        return false;
+    }
+
+    stopAudioPlayback();
+    audioFile = new AudioFileSourceSD(path);
+    audioMp3 = new AudioGeneratorMP3();
+    if (!audioFile || !audioMp3) {
+        Serial.println("MP3 decoder allocation failed");
+        stopAudioPlayback();
+        return false;
+    }
+
+    if (!audioMp3->begin(audioFile, audioOut)) {
+        Serial.printf("MP3 begin failed: %s\n", path);
+        stopAudioPlayback();
+        return false;
+    }
+
+    snprintf(current_audio_path, sizeof(current_audio_path), "%s", path);
+    Serial.printf("MP3 playback started: %s\n", current_audio_path);
+    return true;
+}
+
+static void serviceAudioPlayback()
+{
+    if (!audioMp3 || !audioMp3->isRunning()) {
+        return;
+    }
+
+    if (!audioMp3->loop()) {
+        Serial.println("MP3 playback finished");
+        stopAudioPlayback();
+        if (music_playing) {
+            music_playing = false;
+            snprintf(music_player_status, sizeof(music_player_status), "播放结束");
+            if (showingMusicPlayer) {
+                refreshMusicPlayerHeaderArea();
+            }
+        }
+    }
+}
+
 static bool saveMusicToSd(int32_t songId, const char *title, const char *filename, const char *audioUrl, const char *source)
 {
     if (songId <= 0 || !ensureSdReady()) return false;
@@ -7621,11 +7736,19 @@ static bool handleMusicPlayerTouch(int16_t tx, int16_t ty)
     if (selected_music_url[0] == '\0') {
         music_player_status[0] = '\0';
         refreshMusicPlayerHeaderArea();
-        if (selected_music_id > 0 && fetchSelectedMusic(selected_music_id)) music_playing = true;
+        if (selected_music_id > 0 && fetchSelectedMusic(selected_music_id)) {
+            music_playing = startAudioPlayback(selected_music_url);
+            snprintf(music_player_status, sizeof(music_player_status), "%s", music_playing ? "正在播放" : "Play failed");
+        }
         refreshMusicPlayerHeaderArea();
         return true;
     }
-    music_playing = !music_playing;
+    if (music_playing) {
+        stopAudioPlayback();
+        music_playing = false;
+    } else {
+        music_playing = startAudioPlayback(selected_music_url);
+    }
     snprintf(music_player_status, sizeof(music_player_status), "%s", music_playing ? "正在播放" : "已暂停");
     refreshMusicPlayerHeaderArea();
     return true;
@@ -7788,6 +7911,8 @@ void setup()
 
 void loop()
 {
+    serviceAudioPlayback();
+
     processPendingBookAutoSave();
     processPendingStoryAutoSave();
 
