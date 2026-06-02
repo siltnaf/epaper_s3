@@ -86,6 +86,8 @@ bool showingBookLibrary = false;
 bool showingBookReader = false;
 bool showingVoiceStoryLibrary = false;
 bool showingVoiceStoryReader = false;
+bool showingMusicLibrary = false;
+bool showingMusicPlayer = false;
 bool showingSdMenu = false;
 bool showingSdFolder = false;
 char sd_status_message[96] = "";
@@ -164,6 +166,29 @@ int32_t story_reader_total_pages = 1;
 bool pending_story_auto_save = false;
 int32_t pending_story_auto_save_id = 0;
 uint32_t pending_story_auto_save_after = 0;
+bool story_playing = false;
+
+#define MAX_MUSIC_ITEMS 10
+struct MusicListItem {
+    int32_t id;
+    char title[80];
+    char filename[80];
+    char audio_url[180];
+    char source[40];
+    bool saved;
+};
+MusicListItem music_items[MAX_MUSIC_ITEMS];
+int music_count = 0;
+int music_total = 0;
+int32_t music_current_page = 1;
+char music_library_status[96] = "Tap music icon to load songs";
+int32_t selected_music_id = 0;
+char selected_music_title[80] = "";
+char selected_music_filename[80] = "";
+char selected_music_url[180] = "";
+char selected_music_source[40] = "";
+char music_player_status[96] = "Select a song";
+bool music_playing = false;
 
 struct ClockWeatherInfo {
     char city[64];
@@ -249,6 +274,11 @@ static void drawBookReaderScreen();
 static void drawBookLibraryLoadingScreen();
 static void drawVoiceStoryLibraryScreen();
 static void drawVoiceStoryReaderScreen();
+static void drawVoiceStoryPlayerHeader();
+static void drawMusicLibraryScreen();
+static void drawMusicPlayerScreen();
+static void drawMusicPlayerHeader();
+static void drawVoiceStoryPlayPauseIcon(int32_t x, int32_t y, int32_t w, int32_t h, bool pauseIcon, uint8_t color);
 static void drawSdMenuScreen();
 static void drawSdFolderScreen();
 static void formatSdCard();
@@ -261,6 +291,8 @@ static void drawVoiceStoryIcon(int32_t x, int32_t y, int32_t w, int32_t h);
 static void drawMusicIcon(int32_t x, int32_t y, int32_t w, int32_t h);
 static void drawBookNavArrowIcon(int32_t x, int32_t y, bool up);
 static void refreshDisplay(void (*drawFn)());
+static void refreshDisplayExtended(void (*drawFn)(), bool use_black_refresh, int32_t refreshTime);
+static void epdDrawFastWithGhostControl(Rect_t area, uint8_t *areaBuffer, uint8_t frameCount = 8, bool forceClean = false);
 static void wipeHomeIconArea(uint8_t iconId);
 static void drawWifiPasswordInputBox();
 static void drawContentUrlInputBox();
@@ -273,6 +305,9 @@ static void refreshBookLibraryListArea();
 static void refreshBookReaderContentArea();
 static void refreshVoiceStoryLibraryListArea();
 static void refreshVoiceStoryReaderContentArea();
+static void refreshVoiceStoryPlayerHeaderArea();
+static void refreshMusicLibraryListArea();
+static void refreshMusicPlayerHeaderArea();
 static void refreshVoiceStorySaveIconArea(int storyIndex);
 static uint8_t *copyPhysicalAreaFromFramebuffer(Rect_t area);
 static bool findChangedArea(Rect_t baseArea, const uint8_t *oldBuffer, const uint8_t *newBuffer, Rect_t *changedArea);
@@ -280,10 +315,23 @@ static bool findWhiteRecoveryArea(Rect_t baseArea, const uint8_t *oldBuffer, con
 static bool findBlackDrawArea(Rect_t baseArea, const uint8_t *oldBuffer, const uint8_t *newBuffer, Rect_t *drawArea);
 static bool fetchSelectedBook(int32_t bookId);
 static bool fetchSelectedVoiceStory(int32_t storyId);
+static bool fetchMusicLibrary();
+static bool fetchSelectedMusic(int32_t songId);
+static bool saveMusicToSd(int32_t songId, const char *title, const char *filename, const char *audioUrl, const char *source);
+static bool isMusicSavedOnSd(int32_t songId);
+static bool loadMusicFromSd(int32_t songId, char *title, char *filename, char *audioPath, char *source);
+static bool loadSavedMusicFromSd();
+static bool fetchAndSaveMusicItem(MusicListItem &song);
+static void refreshMusicSaveIconArea(int musicIndex);
+static void buildMusicApiUrl(char *out, size_t outSize);
+static void buildMusicDetailApiUrl(char *out, size_t outSize, int32_t songId);
+static bool buildMusicAudioDownloadUrl(const char *audioUrl, char *out, size_t outSize);
+static bool handleMusicPlayerTouch(int16_t tx, int16_t ty);
 static void buildBookDetailApiUrl(char *out, size_t outSize, int32_t bookId);
 static void buildVoiceStoryDetailApiUrl(char *out, size_t outSize, int32_t storyId);
 static void buildContentApiUrl(char *out, size_t outSize, const char *endpoint, const char *query = NULL);
 static bool httpGetString(const char *url, String &payload, char *status, size_t statusSize, uint32_t timeoutMs = 10000);
+static bool httpDownloadToSdFile(const char *url, const char *path, char *status, size_t statusSize, uint32_t timeoutMs = 60000);
 static bool waitForWifiReady(uint32_t timeoutMs);
 static void warmupContentServer(bool force = false);
 static bool fetchClockWeatherInfo();
@@ -303,6 +351,9 @@ static bool touchHitsPortraitRect(int16_t tx, int16_t ty, int32_t rx, int32_t ry
 static bool handleSettingsTouch(int16_t tx, int16_t ty);
 static bool handleSettingsMenuTouch(int16_t tx, int16_t ty);
 static bool handleContentSettingsTouch(int16_t tx, int16_t ty);
+static bool handleVoiceStoryReaderTouch(int16_t tx, int16_t ty);
+static bool touchHitsVoiceStoryTile(int16_t tx, int16_t ty);
+static bool touchHitsMusicTile(int16_t tx, int16_t ty);
 static void processTouchRelease(int16_t startX, int16_t startY, int16_t endX, int16_t endY);
 static bool handleBookSwipe(int16_t startX, int16_t startY, int16_t endX, int16_t endY);
 static bool getPortraitSwipeDelta(int16_t startX, int16_t startY, int16_t endX, int16_t endY, int32_t *dx, int32_t *dy);
@@ -334,6 +385,7 @@ static bool isStorySavedOnSd(int32_t storyId);
 static bool fetchAndSaveStoryItem(StoryListItem &story);
 static void queueSelectedStoryAutoSave();
 static void processPendingStoryAutoSave();
+static const char *voiceStoryPayloadFromJson(JsonObject item);
 
 static const uint8_t clockIcon50x50[] = {
     0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
@@ -422,7 +474,8 @@ static const int32_t BOOK_LIST_REFRESH_BOTTOM_MARGIN = 8;
 static const int32_t BOOK_SAVE_ICON_SIZE = 28;
 static const int32_t BOOK_SAVE_ICON_MARGIN = 4;
 static const char BOOK_SD_FOLDER[] = "/books";
-static const char STORY_SD_FOLDER[] = "/stories";
+static const char STORY_SD_FOLDER[] = "/voice";
+static const char MUSIC_SD_FOLDER[] = "/music";
 static const int32_t BOOK_READER_CONTENT_X = 24;
 static const int32_t BOOK_READER_CONTENT_Y = 187;
 static const int32_t BOOK_READER_CONTENT_W = PORTRAIT_WIDTH - 48;
@@ -438,6 +491,18 @@ static const int32_t SETTINGS_MENU_ITEM_H = 86;
 static const int32_t SETTINGS_MENU_ITEM_GAP = 28;
 static const int32_t SETTINGS_MENU_FIRST_Y = 190;
 static const uint8_t EPD_FAST_PARTIAL_FRAMES = 4;
+static const uint8_t EPD_BALANCED_PARTIAL_FRAMES = 8;
+static const uint8_t EPD_CLEANUP_PARTIAL_FRAMES = 12;
+static const uint8_t EPD_PARTIAL_CLEAN_INTERVAL = 6;
+static uint8_t epd_partial_refresh_count = 0;
+static const int32_t STORY_PLAYER_CARD_X = 18;
+static const int32_t STORY_PLAYER_CARD_Y = 72;
+static const int32_t STORY_PLAYER_CARD_W = PORTRAIT_WIDTH - 36;
+static const int32_t STORY_PLAYER_CARD_H = 96;
+static const int32_t STORY_PLAYER_BUTTON_X = PORTRAIT_WIDTH - 152;
+static const int32_t STORY_PLAYER_BUTTON_Y = 96;
+static const int32_t STORY_PLAYER_BUTTON_W = 116;
+static const int32_t STORY_PLAYER_BUTTON_H = 50;
 
 static const char wifi_keyboard_numbers[10] = {'1', '2', '3', '4', '5', '6', '7', '8', '9', '0'};
 
@@ -2591,6 +2656,13 @@ static void drawBookLibraryLoadingScreen()
     drawPortraitTextCentered("Loading Books...", 360, (GFXfont *)&FiraSans);
 }
 
+static void drawMusicLibraryLoadingScreen()
+{
+    memset(framebuffer, 0xFF, EPD_WIDTH * EPD_HEIGHT / 2);
+    drawTopStatusBar();
+    drawUtf8ChineseTextInRectSingleWidth("加载儿歌", 0, 340, PORTRAIT_WIDTH, 60);
+}
+
 static void drawBookLibraryRowsArea()
 {
     // The page-navigation partial refresh owns only this lower content band.
@@ -2642,11 +2714,8 @@ static void drawBookLibraryRowsArea()
         // Indented cleanly on the left, vertically centered inside the row box.
         drawUtf8ChineseTextLeftAligned(book_items[i].title, BOOK_LIST_X + 16, y, BOOK_LIST_ROW_BOX_H);
 
-        // Show category on the right side of the row (right-aligned, vertically centered).
-        // Leave space for save icon on the right
-        if (book_items[i].category[0] != '\0') {
-            drawUtf8ChineseTextRightAligned(book_items[i].category, BOOK_LIST_X + BOOK_LIST_W - BOOK_SAVE_ICON_SIZE - 20, y, BOOK_LIST_ROW_BOX_H);
-        }
+        // Category names are intentionally hidden in the list UI; keep the
+        // right side clean except for the SD save icon.
     }
 
     // Draw save icons inside the row boxes, near the right edge
@@ -2688,6 +2757,105 @@ static void drawBookLibraryScreen()
     drawBookLibraryRowsArea();
 }
 
+static void drawMusicRowsArea()
+{
+    portraitFillRect(0,
+                     BOOK_LIST_REFRESH_Y,
+                     PORTRAIT_WIDTH,
+                     PORTRAIT_HEIGHT - BOOK_LIST_REFRESH_Y - BOOK_LIST_REFRESH_BOTTOM_MARGIN,
+                     0xFF);
+
+    if (music_count > 0 && !showingMusicPlayer) {
+        char summary[32];
+        int displayedCount = (int)((music_current_page - 1) * MAX_MUSIC_ITEMS) + music_count;
+        if (music_total > 0 && displayedCount > music_total) {
+            displayedCount = music_total;
+        }
+        snprintf(summary, sizeof(summary), "%d/%d", displayedCount, music_total);
+        portraitFillRect(54, 126, PORTRAIT_WIDTH - 108, 38, 0xFF);
+        drawPortraitTextInRectCenteredScaled(summary, 54, 132, PORTRAIT_WIDTH - 108, 28, (GFXfont *)&FiraSans, 0.46f);
+    }
+
+    if (music_count <= 0) {
+        drawPortraitTextInRectCenteredScaled(music_library_status, 34, 250, PORTRAIT_WIDTH - 68, 80, (GFXfont *)&FiraSans, 0.72f);
+        return;
+    }
+
+    for (int i = 0; i < music_count; ++i) {
+        const int32_t y = BOOK_LIST_Y + i * BOOK_LIST_ROW_H;
+        if (y + BOOK_LIST_ROW_BOX_H > PORTRAIT_HEIGHT - 14) {
+            break;
+        }
+        portraitDrawRect(BOOK_LIST_X, y, BOOK_LIST_W, BOOK_LIST_ROW_BOX_H, 0x00);
+        drawUtf8ChineseTextLeftAlignedClipped(music_items[i].title,
+                                              BOOK_LIST_X + 16,
+                                              y,
+                                              BOOK_LIST_W - BOOK_SAVE_ICON_SIZE - 34,
+                                              BOOK_LIST_ROW_BOX_H);
+
+        int32_t saveIconX = BOOK_LIST_X + BOOK_LIST_W - BOOK_SAVE_ICON_SIZE - 8;
+        int32_t saveIconY = y + (BOOK_LIST_ROW_BOX_H - BOOK_SAVE_ICON_SIZE) / 2;
+        drawBookSaveIcon(saveIconX, saveIconY, music_items[i].saved);
+    }
+}
+
+static void drawMusicLibraryScreen()
+{
+    memset(framebuffer, 0xFF, EPD_WIDTH * EPD_HEIGHT / 2);
+    drawTopStatusBar();
+    drawUtf8ChineseTextInRectSingleWidth("儿歌", 0, 64, PORTRAIT_WIDTH, 40);
+    drawMusicRowsArea();
+}
+
+static void drawMusicPlayerHeader()
+{
+    portraitFillRect(0, TOP_STATUS_BAR_H, PORTRAIT_WIDTH, BOOK_READER_CONTENT_Y - TOP_STATUS_BAR_H, 0xFF);
+    portraitDrawRect(STORY_PLAYER_CARD_X, STORY_PLAYER_CARD_Y, STORY_PLAYER_CARD_W, STORY_PLAYER_CARD_H, 0x00);
+    portraitDrawRect(STORY_PLAYER_CARD_X + 2, STORY_PLAYER_CARD_Y + 2, STORY_PLAYER_CARD_W - 4, STORY_PLAYER_CARD_H - 4, 0x00);
+
+    const char *title = selected_music_title[0] != '\0' ? selected_music_title : music_player_status;
+    drawUtf8ChineseTextLeftAlignedClipped(title,
+                                          STORY_PLAYER_CARD_X + 18,
+                                          STORY_PLAYER_CARD_Y + 12,
+                                          STORY_PLAYER_BUTTON_X - STORY_PLAYER_CARD_X - 34,
+                                          40);
+    drawUtf8ChineseTextLeftAlignedClipped(title,
+                                          STORY_PLAYER_CARD_X + 18 + BOOK_READER_FONT_BOLD_PIXELS,
+                                          STORY_PLAYER_CARD_Y + 12,
+                                          STORY_PLAYER_BUTTON_X - STORY_PLAYER_CARD_X - 34,
+                                          40);
+
+    const char *status = music_playing ? "正在播放" : "状态: 已暂停";
+    if (selected_music_url[0] == '\0') {
+        status = music_player_status;
+    }
+    drawUtf8ChineseTextLeftAlignedClipped(status,
+                                          STORY_PLAYER_CARD_X + 18,
+                                          STORY_PLAYER_CARD_Y + 54,
+                                          STORY_PLAYER_BUTTON_X - STORY_PLAYER_CARD_X - 34,
+                                          32);
+
+    portraitFillRect(STORY_PLAYER_BUTTON_X, STORY_PLAYER_BUTTON_Y, STORY_PLAYER_BUTTON_W, STORY_PLAYER_BUTTON_H, 0xFF);
+    if (selected_music_url[0] == '\0') {
+        drawUtf8ChineseTextInRectSingleWidth("加载", STORY_PLAYER_BUTTON_X, STORY_PLAYER_BUTTON_Y + 7, STORY_PLAYER_BUTTON_W, STORY_PLAYER_BUTTON_H - 14);
+    } else {
+        drawVoiceStoryPlayPauseIcon(STORY_PLAYER_BUTTON_X,
+                                    STORY_PLAYER_BUTTON_Y,
+                                    STORY_PLAYER_BUTTON_W,
+                                    STORY_PLAYER_BUTTON_H,
+                                    music_playing,
+                                    0x00);
+    }
+}
+
+static void drawMusicPlayerScreen()
+{
+    memset(framebuffer, 0xFF, EPD_WIDTH * EPD_HEIGHT / 2);
+    drawTopStatusBar();
+    drawMusicPlayerHeader();
+    drawMusicRowsArea();
+}
+
 static void drawVoiceStoryRowsArea()
 {
     portraitFillRect(0,
@@ -2696,7 +2864,7 @@ static void drawVoiceStoryRowsArea()
                      PORTRAIT_HEIGHT - BOOK_LIST_REFRESH_Y - BOOK_LIST_REFRESH_BOTTOM_MARGIN,
                      0xFF);
 
-    if (story_count > 0) {
+    if (story_count > 0 && !showingVoiceStoryReader) {
         char summary[32];
         int displayedCount = (int)((story_current_page - 1) * MAX_STORY_ITEMS) + story_count;
         if (story_total > 0 && displayedCount > story_total) {
@@ -2734,10 +2902,8 @@ static void drawVoiceStoryRowsArea()
         // Display Chinese story title
         drawUtf8ChineseTextLeftAligned(story_items[i].title, BOOK_LIST_X + 16, y, BOOK_LIST_ROW_BOX_H);
 
-        // Show category on the right side of the row (right-aligned, vertically centered)
-        if (story_items[i].category[0] != '\0') {
-            drawUtf8ChineseTextRightAligned(story_items[i].category, BOOK_LIST_X + BOOK_LIST_W - BOOK_SAVE_ICON_SIZE - 20, y, BOOK_LIST_ROW_BOX_H);
-        }
+        // Category names are intentionally hidden in the list UI; keep the
+        // right side clean except for the SD save icon.
     }
 
     // Draw save icons inside the row boxes, near the right edge
@@ -2754,8 +2920,8 @@ static void drawVoiceStoryLibraryScreen()
     memset(framebuffer, 0xFF, EPD_WIDTH * EPD_HEIGHT / 2);
     drawTopStatusBar();
 
-    // draw "故事" (Stories) in Chinese
-    drawUtf8ChineseTextInRectSingleWidth("故事", 0, 84, PORTRAIT_WIDTH, 40);
+    // draw "讲故事" (Tell Stories) in Chinese
+    drawUtf8ChineseTextInRectSingleWidth("讲故事", 0, 64, PORTRAIT_WIDTH, 40);
 
     drawVoiceStoryRowsArea();
 }
@@ -2861,9 +3027,71 @@ static void drawVoiceStoryReaderScreen()
     memset(framebuffer, 0xFF, EPD_WIDTH * EPD_HEIGHT / 2);
     drawTopStatusBar();
 
+    drawVoiceStoryPlayerHeader();
+    // Voice stories are audio-first: the full story text is kept in memory/SD
+    // for the voice module to read, but it is intentionally not displayed.
+    // Keep the story list visible below the player card, matching the web
+    // voice-story layout and allowing the user to stay focused on playback.
+    drawVoiceStoryRowsArea();
+}
+
+static void drawVoiceStoryPlayerHeader()
+{
+    portraitFillRect(0, TOP_STATUS_BAR_H, PORTRAIT_WIDTH, BOOK_READER_CONTENT_Y - TOP_STATUS_BAR_H, 0xFF);
+
+    const bool contentLoading = selected_story_content.length() == 0 && strstr(story_reader_status, "Loading") != NULL;
+    if (contentLoading) {
+        // During the network/SD fetch, keep the player title bar hidden. The
+        // previous list row title can otherwise ghost into this dense header
+        // band on e-paper and create dark noise below the selected title.
+        drawUtf8ChineseTextInRectSingleWidth("加载中", 0, 112, PORTRAIT_WIDTH, 44);
+        return;
+    }
+
+    portraitDrawRect(STORY_PLAYER_CARD_X, STORY_PLAYER_CARD_Y, STORY_PLAYER_CARD_W, STORY_PLAYER_CARD_H, 0x00);
+    portraitDrawRect(STORY_PLAYER_CARD_X + 2, STORY_PLAYER_CARD_Y + 2, STORY_PLAYER_CARD_W - 4, STORY_PLAYER_CARD_H - 4, 0x00);
+
     const char *title = selected_story_title[0] != '\0' ? selected_story_title : story_reader_status;
-    drawUtf8ChineseTextLeftAlignedClipped(title, 24, 84, PORTRAIT_WIDTH - 48, 40);
-    drawUtf8ChineseTextLeftAlignedClipped(title, 24 + BOOK_READER_FONT_BOLD_PIXELS, 84, PORTRAIT_WIDTH - 48, 40);
+    drawUtf8ChineseTextLeftAlignedClipped(title,
+                                          STORY_PLAYER_CARD_X + 18,
+                                          STORY_PLAYER_CARD_Y + 12,
+                                          STORY_PLAYER_BUTTON_X - STORY_PLAYER_CARD_X - 34,
+                                          40);
+    drawUtf8ChineseTextLeftAlignedClipped(title,
+                                          STORY_PLAYER_CARD_X + 18 + BOOK_READER_FONT_BOLD_PIXELS,
+                                          STORY_PLAYER_CARD_Y + 12,
+                                          STORY_PLAYER_BUTTON_X - STORY_PLAYER_CARD_X - 34,
+                                          40);
+
+    const char *status = story_playing ? "正在播放" : "状态: 已暂停";
+    if (selected_story_content.length() == 0) {
+        status = story_reader_status;
+    }
+    drawUtf8ChineseTextLeftAlignedClipped(status,
+                                          STORY_PLAYER_CARD_X + 18,
+                                          STORY_PLAYER_CARD_Y + 54,
+                                          STORY_PLAYER_BUTTON_X - STORY_PLAYER_CARD_X - 34,
+                                          32);
+
+    // Play/pause control: icon only. No filled button and no frame.
+    portraitFillRect(STORY_PLAYER_BUTTON_X,
+                     STORY_PLAYER_BUTTON_Y,
+                     STORY_PLAYER_BUTTON_W,
+                     STORY_PLAYER_BUTTON_H,
+                     0xFF);
+
+    if (selected_story_content.length() == 0) {
+        drawUtf8ChineseTextInRectSingleWidth("加载", STORY_PLAYER_BUTTON_X, STORY_PLAYER_BUTTON_Y + 7, STORY_PLAYER_BUTTON_W, STORY_PLAYER_BUTTON_H - 14);
+    } else {
+        // Draw a thin black outline play/pause icon only, matching the
+        // uploaded play.jpg / pause.jpg style with no surrounding frame.
+        drawVoiceStoryPlayPauseIcon(STORY_PLAYER_BUTTON_X,
+                                    STORY_PLAYER_BUTTON_Y,
+                                    STORY_PLAYER_BUTTON_W,
+                                    STORY_PLAYER_BUTTON_H,
+                                    story_playing,
+                                    0x00);
+    }
 
     char summary[32];
     snprintf(summary, sizeof(summary), "%ld/%ld", (long)(story_reader_page + 1), (long)story_reader_total_pages);
@@ -2874,8 +3102,87 @@ static void drawVoiceStoryReaderScreen()
                                          28,
                                          (GFXfont *)&FiraSans,
                                          0.46f);
+}
 
-    drawVoiceStoryReaderContentPage();
+static void drawVoiceStoryPlayPauseIcon(int32_t x, int32_t y, int32_t w, int32_t h, bool pauseIcon, uint8_t color)
+{
+    const int32_t cx = x + w / 2;
+    const int32_t cy = y + h / 2;
+
+    if (pauseIcon) {
+        const int32_t barW = 10;
+        const int32_t barH = 28;
+        const int32_t gap = 10;
+        // Thin outline pause icon, matching the uploaded pause.jpg style.
+        portraitDrawRect(cx - gap / 2 - barW, cy - barH / 2, barW, barH, color);
+        portraitDrawRect(cx + gap / 2, cy - barH / 2, barW, barH, color);
+        return;
+    }
+
+    const int32_t triW = 30;
+    const int32_t triH = 32;
+    const int32_t leftX = cx - triW / 2 + 3;
+    const int32_t rightX = cx + triW / 2;
+    const int32_t topY = cy - triH / 2;
+    const int32_t bottomY = cy + triH / 2;
+
+    // Thin outline play icon, matching the uploaded play.jpg style.
+    portraitDrawLine(leftX, topY, leftX, bottomY, color);
+    portraitDrawLine(leftX, topY, rightX, cy, color);
+    portraitDrawLine(leftX, bottomY, rightX, cy, color);
+}
+
+static void refreshVoiceStoryPlayerHeaderArea()
+{
+    drawVoiceStoryPlayerHeader();
+
+    Rect_t headerArea = portraitRectToPhysicalRect(0, TOP_STATUS_BAR_H, PORTRAIT_WIDTH, BOOK_READER_CONTENT_Y - TOP_STATUS_BAR_H);
+    uint8_t *headerBuffer = copyPhysicalAreaFromFramebuffer(headerArea);
+    if (!headerBuffer) {
+        return;
+    }
+
+    epd_poweron();
+    epd_push_pixels(headerArea, 55, 1);
+    epd_push_pixels(headerArea, 55, 1);
+    epd_draw_grayscale_image(headerArea, headerBuffer);
+    epd_poweroff();
+    free(headerBuffer);
+}
+
+static bool handleVoiceStoryReaderTouch(int16_t tx, int16_t ty)
+{
+    int32_t px = 0;
+    int32_t py = 0;
+    if (!portraitPointFromTouch(tx, ty, &px, &py, true)) {
+        if (!portraitPointFromTouch(tx, ty, &px, &py, false)) {
+            return false;
+        }
+    }
+
+    if (!pointInRect(px, py, STORY_PLAYER_BUTTON_X, STORY_PLAYER_BUTTON_Y, STORY_PLAYER_BUTTON_W, STORY_PLAYER_BUTTON_H)) {
+        return false;
+    }
+
+    if (selected_story_content.length() == 0) {
+        snprintf(story_reader_status, sizeof(story_reader_status), "Loading story...");
+        refreshVoiceStoryPlayerHeaderArea();
+        if (selected_story_id > 0 && fetchSelectedVoiceStory(selected_story_id)) {
+            story_playing = true;
+            // Loading from the player button changes only the player/title
+            // header; keep the visible story list below untouched.
+            refreshVoiceStoryPlayerHeaderArea();
+            queueSelectedStoryAutoSave();
+        } else {
+            refreshVoiceStoryPlayerHeaderArea();
+        }
+        return true;
+    }
+
+    story_playing = !story_playing;
+    snprintf(story_reader_status, sizeof(story_reader_status), "%s", story_playing ? "正在播放" : "已暂停");
+    refreshVoiceStoryPlayerHeaderArea();
+    return true;
 }
 
 static int32_t utf8CodepointCount(const char *text)
@@ -3246,7 +3553,7 @@ static void refreshChangedClockDigitalTimeCells(const char *timeLine)
         }
 
         epd_poweron();
-        epd_draw_grayscale_image_fast(area, areaBuffer, EPD_FAST_PARTIAL_FRAMES);
+        epdDrawFastWithGhostControl(area, areaBuffer, EPD_BALANCED_PARTIAL_FRAMES);
         epd_poweroff();
         free(areaBuffer);
     }
@@ -3491,7 +3798,7 @@ static void drawAnalogClockScreen()
         drawPortraitTextInRectCenteredScaled(clock_weather.wind[0] ? clock_weather.wind : "--", 184, weatherBoxY + 128, 86, 50, (GFXfont *)&FiraSans, 0.75f);
         drawUtf8ChineseTextInRectSingleWidthScaled("千米每时", 276, weatherBoxY + 132, 180, 46, 1.0f);
     } else {
-        drawUtf8ChineseTextInRectSingleWidth(clock_weather.status, 48, weatherBoxY + 50, PORTRAIT_WIDTH - 96, 60);
+        drawUtf8ChineseTextInRectSingleWidth("加载中", 48, weatherBoxY + 50, PORTRAIT_WIDTH - 96, 60);
     }
 }
 
@@ -3564,7 +3871,7 @@ static void refreshClockTimeArea()
     if (!areaBuffer) return;
 
     epd_poweron();
-    epd_draw_grayscale_image_fast(area, areaBuffer, EPD_FAST_PARTIAL_FRAMES);
+    epdDrawFastWithGhostControl(area, areaBuffer, EPD_BALANCED_PARTIAL_FRAMES);
     epd_poweroff();
     free(areaBuffer);
 }
@@ -3630,7 +3937,7 @@ static void refreshClockHandsArea()
     if (drawNewArm) {
         uint8_t *newArmBuffer = copyPhysicalAreaFromFramebuffer(drawNewArmArea);
         if (newArmBuffer) {
-            epd_draw_grayscale_image_fast(drawNewArmArea, newArmBuffer, EPD_FAST_PARTIAL_FRAMES);
+            epdDrawFastWithGhostControl(drawNewArmArea, newArmBuffer, EPD_FAST_PARTIAL_FRAMES);
             free(newArmBuffer);
         }
     }
@@ -3654,7 +3961,7 @@ static void refreshClockHandsArea()
         uint8_t *cellBuffer = copyPhysicalAreaFromFramebuffer(cellArea);
         if (cellBuffer) {
             epd_push_pixels(cellArea, 45, 1);
-            epd_draw_grayscale_image_fast(cellArea, cellBuffer, EPD_FAST_PARTIAL_FRAMES);
+            epdDrawFastWithGhostControl(cellArea, cellBuffer, EPD_FAST_PARTIAL_FRAMES);
             free(cellBuffer);
         }
     }
@@ -3705,7 +4012,7 @@ static void refreshClockInfoArea()
         drawPortraitTextInRectCenteredScaled(clock_weather.wind[0] ? clock_weather.wind : "--", 184, weatherBoxY + 128, 86, 50, (GFXfont *)&FiraSans, 0.75f);
         drawUtf8ChineseTextInRectSingleWidthScaled("千米每时", 276, weatherBoxY + 132, 180, 46, 1.0f);
     } else {
-        drawUtf8ChineseTextInRectSingleWidth(clock_weather.status, 48, weatherBoxY + 50, PORTRAIT_WIDTH - 96, 60);
+        drawUtf8ChineseTextInRectSingleWidth("加载中", 48, weatherBoxY + 50, PORTRAIT_WIDTH - 96, 60);
     }
 
     Rect_t infoArea = portraitRectToPhysicalRect(0, infoY, PORTRAIT_WIDTH, infoH);
@@ -3721,7 +4028,7 @@ static void refreshClockInfoArea()
     for (int i = 0; i < 3; ++i) {
         epd_push_pixels(infoArea, 50, 1);
     }
-    epd_draw_grayscale_image_fast(infoArea, infoBuffer, EPD_FAST_PARTIAL_FRAMES);
+    epdDrawFastWithGhostControl(infoArea, infoBuffer, EPD_BALANCED_PARTIAL_FRAMES, true);
     epd_poweroff();
     free(infoBuffer);
 }
@@ -4254,6 +4561,28 @@ static void refreshDisplay(void (*drawFn)())
     refreshDisplayExtended(drawFn, false);
 }
 
+static void epdDrawFastWithGhostControl(Rect_t area, uint8_t *areaBuffer, uint8_t frameCount, bool forceClean)
+{
+    if (!areaBuffer) {
+        return;
+    }
+
+    epd_partial_refresh_count++;
+    const bool doClean = forceClean || epd_partial_refresh_count >= EPD_PARTIAL_CLEAN_INTERVAL;
+
+    if (doClean) {
+        // Periodic white pre-drive removes residual charge/ghosting without a
+        // heavy full black/white flash. Then use a stronger partial waveform
+        // for better black density on the refreshed area.
+        epd_push_pixels(area, 55, 1);
+        epd_push_pixels(area, 55, 1);
+        epd_draw_grayscale_image_fast(area, areaBuffer, EPD_CLEANUP_PARTIAL_FRAMES);
+        epd_partial_refresh_count = 0;
+    } else {
+        epd_draw_grayscale_image_fast(area, areaBuffer, frameCount);
+    }
+}
+
 static void wipeHomeIconArea(uint8_t iconId)
 {
     if (iconId < 1 || iconId > 6) {
@@ -4367,7 +4696,7 @@ static void refreshBookLibraryListArea()
     epd_push_pixels(listArea, 55, 1);
     epd_push_pixels(listArea, 55, 1);
     epd_draw_grayscale_image(counterArea, counterBuffer);
-    epd_draw_grayscale_image_fast(listArea, listBuffer, EPD_FAST_PARTIAL_FRAMES);
+    epdDrawFastWithGhostControl(listArea, listBuffer, EPD_BALANCED_PARTIAL_FRAMES, true);
     epd_poweroff();
 
     free(counterBuffer);
@@ -4397,7 +4726,7 @@ static void refreshBookSaveIconArea(int bookIndex)
     }
 
     epd_poweron();
-    epd_draw_grayscale_image_fast(iconArea, iconBuffer, EPD_FAST_PARTIAL_FRAMES);
+    epdDrawFastWithGhostControl(iconArea, iconBuffer, EPD_FAST_PARTIAL_FRAMES);
     epd_poweroff();
 
     free(iconBuffer);
@@ -4442,6 +4771,82 @@ static void refreshBookReaderContentArea()
     free(readerBuffer);
 }
 
+static void refreshMusicLibraryListArea()
+{
+    drawMusicRowsArea();
+
+    Rect_t counterArea = portraitRectToPhysicalRect(54, 126, PORTRAIT_WIDTH - 108, 38);
+    uint8_t *counterBuffer = copyPhysicalAreaFromFramebuffer(counterArea);
+
+    const int32_t listRefreshH = PORTRAIT_HEIGHT - BOOK_LIST_REFRESH_Y - BOOK_LIST_REFRESH_BOTTOM_MARGIN;
+    Rect_t listArea = portraitRectToPhysicalRect(0, BOOK_LIST_REFRESH_Y, PORTRAIT_WIDTH, listRefreshH);
+    uint8_t *listBuffer = copyPhysicalAreaFromFramebuffer(listArea);
+    if (!counterBuffer || !listBuffer) {
+        if (counterBuffer) free(counterBuffer);
+        if (listBuffer) free(listBuffer);
+        return;
+    }
+
+    epd_poweron();
+    epd_push_pixels(counterArea, 55, 1);
+    epd_push_pixels(counterArea, 55, 1);
+    epd_push_pixels(counterArea, 55, 1);
+    epd_push_pixels(listArea, 55, 1);
+    epd_push_pixels(listArea, 55, 1);
+    epd_push_pixels(listArea, 55, 1);
+    epd_draw_grayscale_image(counterArea, counterBuffer);
+    epdDrawFastWithGhostControl(listArea, listBuffer, EPD_BALANCED_PARTIAL_FRAMES, true);
+    epd_poweroff();
+
+    free(counterBuffer);
+    free(listBuffer);
+}
+
+static void refreshMusicSaveIconArea(int musicIndex)
+{
+    if (musicIndex < 0 || musicIndex >= music_count) {
+        return;
+    }
+    const int32_t rowY = BOOK_LIST_Y + musicIndex * BOOK_LIST_ROW_H;
+    const int32_t saveIconX = BOOK_LIST_X + BOOK_LIST_W - BOOK_SAVE_ICON_SIZE - 8;
+    const int32_t saveIconY = rowY + (BOOK_LIST_ROW_BOX_H - BOOK_SAVE_ICON_SIZE) / 2;
+    const int32_t margin = 4;
+
+    drawBookSaveIcon(saveIconX, saveIconY, music_items[musicIndex].saved);
+    Rect_t iconArea = portraitRectToPhysicalRect(saveIconX - margin,
+                                                 saveIconY - margin,
+                                                 BOOK_SAVE_ICON_SIZE + margin * 2,
+                                                 BOOK_SAVE_ICON_SIZE + margin * 2);
+    uint8_t *iconBuffer = copyPhysicalAreaFromFramebuffer(iconArea);
+    if (!iconBuffer) {
+        return;
+    }
+
+    epd_poweron();
+    epdDrawFastWithGhostControl(iconArea, iconBuffer, EPD_FAST_PARTIAL_FRAMES);
+    epd_poweroff();
+
+    free(iconBuffer);
+}
+
+static void refreshMusicPlayerHeaderArea()
+{
+    drawMusicPlayerHeader();
+
+    Rect_t headerArea = portraitRectToPhysicalRect(0, TOP_STATUS_BAR_H, PORTRAIT_WIDTH, BOOK_READER_CONTENT_Y - TOP_STATUS_BAR_H);
+    uint8_t *headerBuffer = copyPhysicalAreaFromFramebuffer(headerArea);
+    if (!headerBuffer) {
+        return;
+    }
+
+    epd_poweron();
+    epd_push_pixels(headerArea, 55, 1);
+    epd_push_pixels(headerArea, 55, 1);
+    epd_draw_grayscale_image(headerArea, headerBuffer);
+    epd_poweroff();
+    free(headerBuffer);
+}
+
 static void refreshVoiceStoryLibraryListArea()
 {
     drawVoiceStoryRowsArea();
@@ -4466,7 +4871,7 @@ static void refreshVoiceStoryLibraryListArea()
     epd_push_pixels(listArea, 55, 1);
     epd_push_pixels(listArea, 55, 1);
     epd_draw_grayscale_image(counterArea, counterBuffer);
-    epd_draw_grayscale_image_fast(listArea, listBuffer, EPD_FAST_PARTIAL_FRAMES);
+    epdDrawFastWithGhostControl(listArea, listBuffer, EPD_BALANCED_PARTIAL_FRAMES, true);
     epd_poweroff();
 
     free(counterBuffer);
@@ -4496,7 +4901,7 @@ static void refreshVoiceStorySaveIconArea(int storyIndex)
     }
 
     epd_poweron();
-    epd_draw_grayscale_image_fast(iconArea, iconBuffer, EPD_FAST_PARTIAL_FRAMES);
+    epdDrawFastWithGhostControl(iconArea, iconBuffer, EPD_FAST_PARTIAL_FRAMES);
     epd_poweroff();
 
     free(iconBuffer);
@@ -4510,31 +4915,21 @@ static void refreshVoiceStoryReaderContentArea()
 
     drawVoiceStoryReaderScreen();
 
-    Rect_t counterArea = portraitRectToPhysicalRect(54, 126, PORTRAIT_WIDTH - 108, 38);
-    uint8_t *counterBuffer = copyPhysicalAreaFromFramebuffer(counterArea);
-
-    const int32_t readerRefreshH = PORTRAIT_HEIGHT - BOOK_READER_CONTENT_Y - BOOK_LIST_REFRESH_BOTTOM_MARGIN;
-    Rect_t readerArea = portraitRectToPhysicalRect(0, BOOK_READER_CONTENT_Y, PORTRAIT_WIDTH, readerRefreshH);
-    uint8_t *readerBuffer = copyPhysicalAreaFromFramebuffer(readerArea);
-    if (!counterBuffer || !readerBuffer) {
-        if (counterBuffer) free(counterBuffer);
-        if (readerBuffer) free(readerBuffer);
+    const int32_t listRefreshH = PORTRAIT_HEIGHT - BOOK_LIST_REFRESH_Y - BOOK_LIST_REFRESH_BOTTOM_MARGIN;
+    Rect_t listArea = portraitRectToPhysicalRect(0, BOOK_LIST_REFRESH_Y, PORTRAIT_WIDTH, listRefreshH);
+    uint8_t *listBuffer = copyPhysicalAreaFromFramebuffer(listArea);
+    if (!listBuffer) {
         return;
     }
 
     epd_poweron();
-    epd_push_pixels(counterArea, 55, 1);
-    epd_push_pixels(counterArea, 55, 1);
-    epd_push_pixels(counterArea, 55, 1);
-    epd_push_pixels(readerArea, 55, 1);
-    epd_push_pixels(readerArea, 55, 1);
-    epd_push_pixels(readerArea, 55, 1);
-    epd_draw_grayscale_image(counterArea, counterBuffer);
-    epd_draw_grayscale_image(readerArea, readerBuffer);
+    epd_push_pixels(listArea, 55, 1);
+    epd_push_pixels(listArea, 55, 1);
+    epd_push_pixels(listArea, 55, 1);
+    epd_draw_grayscale_image(listArea, listBuffer);
     epd_poweroff();
 
-    free(counterBuffer);
-    free(readerBuffer);
+    free(listBuffer);
 }
 
 
@@ -4555,7 +4950,7 @@ static void refreshWifiPasswordArea()
     }
 
     epd_poweron();
-    epd_draw_grayscale_image_fast(passwordArea, passwordBuffer, EPD_FAST_PARTIAL_FRAMES);
+    epdDrawFastWithGhostControl(passwordArea, passwordBuffer, EPD_BALANCED_PARTIAL_FRAMES);
     epd_poweroff();
 
     free(passwordBuffer);
@@ -4576,7 +4971,7 @@ static void refreshContentUrlArea()
     }
 
     epd_poweron();
-    epd_draw_grayscale_image_fast(urlArea, urlBuffer, EPD_FAST_PARTIAL_FRAMES);
+    epdDrawFastWithGhostControl(urlArea, urlBuffer, EPD_BALANCED_PARTIAL_FRAMES);
     epd_poweroff();
 
     free(urlBuffer);
@@ -4603,7 +4998,7 @@ static void refreshWifiKeyboardArea()
     }
 
     epd_poweron();
-    epd_draw_grayscale_image_fast(keyboardArea, keyboardBuffer, EPD_FAST_PARTIAL_FRAMES);
+    epdDrawFastWithGhostControl(keyboardArea, keyboardBuffer, EPD_BALANCED_PARTIAL_FRAMES, true);
     epd_poweroff();
 
     free(keyboardBuffer);
@@ -4627,7 +5022,7 @@ static void refreshContentKeyboardArea()
     }
 
     epd_poweron();
-    epd_draw_grayscale_image_fast(keyboardArea, keyboardBuffer, EPD_FAST_PARTIAL_FRAMES);
+    epdDrawFastWithGhostControl(keyboardArea, keyboardBuffer, EPD_BALANCED_PARTIAL_FRAMES, true);
     epd_poweroff();
 
     free(keyboardBuffer);
@@ -4637,16 +5032,22 @@ static void refreshWifiStatusIconArea()
 {
     // Redraw the status bar in the framebuffer so the WiFi icon reflects the
     // current connection state, then update only the icon/tap region on the EPD.
+    // The disconnected icon contains an extra "X" stroke, so connection
+    // transitions need a strong white pre-drive before drawing the connected
+    // icon; otherwise that old X can remain visible on the e-paper panel.
     drawTopStatusBar();
 
-    Rect_t wifiIconArea = portraitRectToPhysicalRect(PORTRAIT_WIDTH - 150, 0, 70, TOP_STATUS_BAR_H);
+    Rect_t wifiIconArea = portraitRectToPhysicalRect(PORTRAIT_WIDTH - 158, 0, 86, TOP_STATUS_BAR_H + 4);
     uint8_t *wifiIconBuffer = copyPhysicalAreaFromFramebuffer(wifiIconArea);
     if (!wifiIconBuffer) {
         return;
     }
 
     epd_poweron();
-    epd_draw_grayscale_image_fast(wifiIconArea, wifiIconBuffer, EPD_FAST_PARTIAL_FRAMES);
+    epd_push_pixels(wifiIconArea, 55, 1);
+    epd_push_pixels(wifiIconArea, 55, 1);
+    epd_push_pixels(wifiIconArea, 55, 1);
+    epd_draw_grayscale_image(wifiIconArea, wifiIconBuffer);
     epd_poweroff();
 
     free(wifiIconBuffer);
@@ -4817,6 +5218,75 @@ static bool handleBookSwipe(int16_t startX, int16_t startY, int16_t endX, int16_
         return true;
     }
 
+    if (showingVoiceStoryLibrary) {
+        if (nextPage) {
+            if (story_current_page * MAX_STORY_ITEMS < story_total) {
+                int32_t previousPage = story_current_page;
+                story_current_page++;
+                if (!fetchVoiceStoryLibrary()) {
+                    story_current_page = previousPage;
+                } else {
+                    refreshVoiceStoryLibraryListArea();
+                }
+            }
+        } else {
+            if (story_current_page > 1) {
+                int32_t previousPage = story_current_page;
+                story_current_page--;
+                if (!fetchVoiceStoryLibrary()) {
+                    story_current_page = previousPage;
+                } else {
+                    refreshVoiceStoryLibraryListArea();
+                }
+            }
+        }
+        return true;
+    }
+
+    if (showingMusicLibrary || showingMusicPlayer) {
+        if (nextPage) {
+            if (music_current_page * MAX_MUSIC_ITEMS < music_total) {
+                int32_t previousPage = music_current_page;
+                music_current_page++;
+                if (!fetchMusicLibrary()) {
+                    music_current_page = previousPage;
+                } else {
+                    refreshMusicLibraryListArea();
+                }
+            }
+        } else {
+            if (music_current_page > 1) {
+                int32_t previousPage = music_current_page;
+                music_current_page--;
+                if (!fetchMusicLibrary()) {
+                    music_current_page = previousPage;
+                } else {
+                    refreshMusicLibraryListArea();
+                }
+            }
+        }
+        return true;
+    }
+
+    if (showingVoiceStoryReader) {
+        if (nextPage) {
+            if (story_reader_page + 1 < story_reader_total_pages) {
+                story_reader_page++;
+                refreshVoiceStoryReaderContentArea();
+            }
+        } else {
+            if (story_reader_page > 0) {
+                story_reader_page--;
+                refreshVoiceStoryReaderContentArea();
+            } else {
+                showingVoiceStoryReader = false;
+                showingVoiceStoryLibrary = true;
+                refreshDisplayExtended(drawVoiceStoryLibraryScreen, true, 90);
+            }
+        }
+        return true;
+    }
+
     return false;
 }
 
@@ -4838,7 +5308,7 @@ static void processTouchRelease(int16_t startX, int16_t startY, int16_t endX, in
 {
     const int16_t x = startX;
     const int16_t y = startY;
-    if ((showingClock || showingCalculator || showingSettings || showingSettingsMenu || showingContentSettings || showingBookLibrary || showingBookReader || showingSdMenu || showingSdFolder) && touchHitsHomeStatusIcon(x, y)) {
+    if ((showingClock || showingCalculator || showingSettings || showingSettingsMenu || showingContentSettings || showingBookLibrary || showingBookReader || showingVoiceStoryLibrary || showingVoiceStoryReader || showingMusicLibrary || showingMusicPlayer || showingSdMenu || showingSdFolder) && touchHitsHomeStatusIcon(x, y)) {
         showingClock = false;
         showingCalculator = false;
         showingSettings = false;
@@ -4846,6 +5316,12 @@ static void processTouchRelease(int16_t startX, int16_t startY, int16_t endX, in
         showingContentSettings = false;
         showingBookLibrary = false;
         showingBookReader = false;
+        showingVoiceStoryLibrary = false;
+        showingVoiceStoryReader = false;
+        showingMusicLibrary = false;
+        showingMusicPlayer = false;
+        story_playing = false;
+        music_playing = false;
         showingSdMenu = false;
         showingSdFolder = false;
         show_password_prompt = false;
@@ -4942,6 +5418,198 @@ static void processTouchRelease(int16_t startX, int16_t startY, int16_t endX, in
         }
     }
 
+    if (showingVoiceStoryLibrary) {
+        if (handleBookSwipe(startX, startY, endX, endY)) {
+            touch_loop_interval = millis() + 300;
+            return;
+        }
+
+        for (int i = 0; i < story_count; ++i) {
+            const int32_t rowY = BOOK_LIST_Y + i * BOOK_LIST_ROW_H;
+
+            int32_t saveIconX = BOOK_LIST_X + BOOK_LIST_W - BOOK_SAVE_ICON_SIZE - 8;
+            int32_t saveIconY = rowY + (BOOK_LIST_ROW_BOX_H - BOOK_SAVE_ICON_SIZE) / 2;
+            if (touchHitsPortraitRect(x, y, saveIconX, saveIconY, BOOK_SAVE_ICON_SIZE, BOOK_SAVE_ICON_SIZE)) {
+                if (story_items[i].id > 0 && !story_items[i].saved && WiFi.status() == WL_CONNECTED) {
+                    if (fetchAndSaveStoryItem(story_items[i])) {
+                        story_items[i].saved = true;
+                        refreshVoiceStorySaveIconArea(i);
+                    }
+                }
+                touch_loop_interval = millis() + 300;
+                return;
+            }
+
+            if (touchHitsPortraitRect(x, y, BOOK_LIST_X, rowY, BOOK_LIST_W, BOOK_LIST_ROW_BOX_H)) {
+                const int32_t tappedStoryId = story_items[i].id;
+                const bool canUseCachedStory = (selected_story_id == tappedStoryId && selected_story_content.length() > 0);
+                selected_story_id = tappedStoryId;
+                snprintf(selected_story_title, sizeof(selected_story_title), "%s", story_items[i].title);
+                snprintf(selected_story_author, sizeof(selected_story_author), "%s", story_items[i].author);
+                snprintf(selected_story_category, sizeof(selected_story_category), "%s", story_items[i].category);
+                story_reader_page = 0;
+                if (canUseCachedStory) {
+                    story_reader_total_pages = countBookReaderPagesByPixelWrap(selected_story_content.c_str());
+                    snprintf(story_reader_status, sizeof(story_reader_status), "Loaded story");
+                } else {
+                    selected_story_content = "";
+                    story_reader_total_pages = 1;
+                    snprintf(story_reader_status, sizeof(story_reader_status), "Loading story...");
+                }
+                showingVoiceStoryLibrary = false;
+                showingVoiceStoryReader = true;
+
+                // The story list already stays visible in the same screen area.
+                // On selection, update only the player/title header band, not
+                // the whole page/list below it.
+                story_playing = false;
+                refreshVoiceStoryPlayerHeaderArea();
+
+                if (!canUseCachedStory) {
+                    if (!fetchSelectedVoiceStory(selected_story_id)) {
+                        selected_story_content = "";
+                    }
+                }
+
+                story_playing = selected_story_content.length() > 0;
+                refreshVoiceStoryPlayerHeaderArea();
+                if (story_playing) {
+                    queueSelectedStoryAutoSave();
+                }
+                touch_loop_interval = millis() + 300;
+                return;
+            }
+        }
+    }
+
+    if (showingVoiceStoryReader) {
+        // While the voice-story player is open, the story list remains visible
+        // below the player card. Tapping a different story should immediately
+        // stop the current playback state, switch the header to the new title,
+        // fetch/load that story, then auto-start playback for the new story.
+        for (int i = 0; i < story_count; ++i) {
+            const int32_t rowY = BOOK_LIST_Y + i * BOOK_LIST_ROW_H;
+            if (!touchHitsPortraitRect(x, y, BOOK_LIST_X, rowY, BOOK_LIST_W, BOOK_LIST_ROW_BOX_H)) {
+                continue;
+            }
+
+            const int32_t tappedStoryId = story_items[i].id;
+            if (tappedStoryId <= 0 || tappedStoryId == selected_story_id) {
+                break;
+            }
+
+            story_playing = false;
+            selected_story_id = tappedStoryId;
+            snprintf(selected_story_title, sizeof(selected_story_title), "%s", story_items[i].title);
+            snprintf(selected_story_author, sizeof(selected_story_author), "%s", story_items[i].author);
+            snprintf(selected_story_category, sizeof(selected_story_category), "%s", story_items[i].category);
+            selected_story_content = "";
+            story_reader_page = 0;
+            story_reader_total_pages = 1;
+            snprintf(story_reader_status, sizeof(story_reader_status), "Loading story...");
+
+            refreshVoiceStoryPlayerHeaderArea();
+            if (fetchSelectedVoiceStory(selected_story_id)) {
+                story_playing = true;
+                refreshVoiceStoryPlayerHeaderArea();
+                queueSelectedStoryAutoSave();
+            } else {
+                story_playing = false;
+                refreshVoiceStoryPlayerHeaderArea();
+            }
+            touch_loop_interval = millis() + 300;
+            return;
+        }
+
+        if (handleVoiceStoryReaderTouch(x, y)) {
+            touch_loop_interval = millis() + 300;
+            return;
+        }
+        if (handleBookSwipe(startX, startY, endX, endY)) {
+            touch_loop_interval = millis() + 300;
+            return;
+        }
+    }
+
+    if (showingMusicLibrary) {
+        if (handleBookSwipe(startX, startY, endX, endY)) {
+            touch_loop_interval = millis() + 300;
+            return;
+        }
+
+        for (int i = 0; i < music_count; ++i) {
+            const int32_t rowY = BOOK_LIST_Y + i * BOOK_LIST_ROW_H;
+            const int32_t saveIconX = BOOK_LIST_X + BOOK_LIST_W - BOOK_SAVE_ICON_SIZE - 8;
+            const int32_t saveIconY = rowY + (BOOK_LIST_ROW_BOX_H - BOOK_SAVE_ICON_SIZE) / 2;
+            if (touchHitsPortraitRect(x, y, saveIconX, saveIconY, BOOK_SAVE_ICON_SIZE, BOOK_SAVE_ICON_SIZE)) {
+                if (music_items[i].id > 0 && !music_items[i].saved && WiFi.status() == WL_CONNECTED) {
+                    snprintf(music_library_status, sizeof(music_library_status), "Saving music...");
+                    if (fetchAndSaveMusicItem(music_items[i])) {
+                        music_items[i].saved = true;
+                        refreshMusicSaveIconArea(i);
+                    } else {
+                        refreshMusicLibraryListArea();
+                    }
+                }
+                touch_loop_interval = millis() + 300;
+                return;
+            }
+            if (touchHitsPortraitRect(x, y, BOOK_LIST_X, rowY, BOOK_LIST_W, BOOK_LIST_ROW_BOX_H)) {
+                selected_music_id = music_items[i].id;
+                snprintf(selected_music_title, sizeof(selected_music_title), "%s", music_items[i].title);
+                snprintf(selected_music_filename, sizeof(selected_music_filename), "%s", music_items[i].filename);
+                snprintf(selected_music_source, sizeof(selected_music_source), "%s", music_items[i].source);
+                selected_music_url[0] = '\0';
+                music_player_status[0] = '\0';
+                music_playing = false;
+                showingMusicLibrary = false;
+                showingMusicPlayer = true;
+                refreshMusicPlayerHeaderArea();
+                fetchSelectedMusic(selected_music_id);
+                music_playing = selected_music_url[0] != '\0';
+                snprintf(music_player_status, sizeof(music_player_status), "%s", music_playing ? "正在播放" : "Load failed");
+                refreshMusicPlayerHeaderArea();
+                touch_loop_interval = millis() + 300;
+                return;
+            }
+        }
+    }
+
+    if (showingMusicPlayer) {
+        for (int i = 0; i < music_count; ++i) {
+            const int32_t rowY = BOOK_LIST_Y + i * BOOK_LIST_ROW_H;
+            if (!touchHitsPortraitRect(x, y, BOOK_LIST_X, rowY, BOOK_LIST_W, BOOK_LIST_ROW_BOX_H)) {
+                continue;
+            }
+            if (music_items[i].id <= 0 || music_items[i].id == selected_music_id) {
+                break;
+            }
+            music_playing = false;
+            selected_music_id = music_items[i].id;
+            snprintf(selected_music_title, sizeof(selected_music_title), "%s", music_items[i].title);
+            snprintf(selected_music_filename, sizeof(selected_music_filename), "%s", music_items[i].filename);
+            snprintf(selected_music_source, sizeof(selected_music_source), "%s", music_items[i].source);
+            selected_music_url[0] = '\0';
+            music_player_status[0] = '\0';
+            refreshMusicPlayerHeaderArea();
+            fetchSelectedMusic(selected_music_id);
+            music_playing = selected_music_url[0] != '\0';
+            snprintf(music_player_status, sizeof(music_player_status), "%s", music_playing ? "正在播放" : "Load failed");
+            refreshMusicPlayerHeaderArea();
+            touch_loop_interval = millis() + 300;
+            return;
+        }
+
+        if (handleMusicPlayerTouch(x, y)) {
+            touch_loop_interval = millis() + 300;
+            return;
+        }
+        if (handleBookSwipe(startX, startY, endX, endY)) {
+            touch_loop_interval = millis() + 300;
+            return;
+        }
+    }
+
     if (showingCalculator && handleCalculatorTouch(x, y)) {
         touch_loop_interval = millis() + 300;
         return;
@@ -4962,7 +5630,7 @@ static void processTouchRelease(int16_t startX, int16_t startY, int16_t endX, in
         return;
     }
 
-    if (!showingClock && !showingCalculator && !showingSettings && !showingSettingsMenu && !showingContentSettings && !showingBookLibrary && !showingBookReader && !showingSdMenu && !showingSdFolder) {
+    if (!showingClock && !showingCalculator && !showingSettings && !showingSettingsMenu && !showingContentSettings && !showingBookLibrary && !showingBookReader && !showingVoiceStoryLibrary && !showingVoiceStoryReader && !showingMusicLibrary && !showingMusicPlayer && !showingSdMenu && !showingSdFolder) {
         if (touchHitsSettingsTile(x, y)) {
             pressedHomeIcon = 1;
             refreshDisplay(drawPortraitHome);
@@ -5010,6 +5678,7 @@ static void processTouchRelease(int16_t startX, int16_t startY, int16_t endX, in
             wipeHomeIconArea(3);
             pressedHomeIcon = 0;
             showingVoiceStoryLibrary = true;
+            story_playing = false;
             story_count = 0;
             story_total = 0;
             story_current_page = 1;
@@ -5033,11 +5702,30 @@ static void processTouchRelease(int16_t startX, int16_t startY, int16_t endX, in
             pressedHomeIcon = 6;
             refreshDisplay(drawPortraitHome);
             delay(350); // delay so user can see visual feedback
-            // Partial wipe only the bolded music icon area
             wipeHomeIconArea(6);
             pressedHomeIcon = 0;
-            // No subpage yet, stay on home page and redraw it thin
-            refreshDisplay(drawPortraitHome);
+            showingMusicLibrary = true;
+            showingMusicPlayer = false;
+            music_playing = false;
+            music_count = 0;
+            music_total = 0;
+            music_current_page = 1;
+            selected_music_id = 0;
+            selected_music_title[0] = '\0';
+            selected_music_url[0] = '\0';
+            if (WiFi.status() != WL_CONNECTED) {
+                memset(framebuffer, 0xFF, EPD_WIDTH * EPD_HEIGHT / 2);
+                drawTopStatusBar();
+                drawPortraitTextCentered("wifi is not connected", 400, (GFXfont *)&FiraSans);
+                epd_poweron();
+                epd_clear();
+                epd_draw_grayscale_image(epd_full_screen(), framebuffer);
+                epd_poweroff();
+                delay(2000);
+            }
+            refreshDisplayExtended(drawMusicLibraryLoadingScreen, true, 80);
+            fetchMusicLibrary();
+            refreshDisplayExtended(drawMusicLibraryScreen, true, 80);
             touch_loop_interval = millis() + 300;
             return;
         }
@@ -5104,6 +5792,11 @@ static void processTouchRelease(int16_t startX, int16_t startY, int16_t endX, in
         showingContentSettings = false;
         showingBookLibrary = false;
         showingBookReader = false;
+        showingVoiceStoryLibrary = false;
+        showingVoiceStoryReader = false;
+        showingMusicLibrary = false;
+        showingMusicPlayer = false;
+        music_playing = false;
         showingSdMenu = false;
         showingSdFolder = false;
         show_password_prompt = false;
@@ -5443,6 +6136,82 @@ static bool httpGetString(const char *url, String &payload, char *status, size_t
     payload = http.getString();
     http.end();
     delay(80);
+    return true;
+}
+
+static bool httpDownloadToSdFile(const char *url, const char *path, char *status, size_t statusSize, uint32_t timeoutMs)
+{
+    if (!url || url[0] == '\0' || !path || path[0] == '\0') {
+        if (status && statusSize > 0) snprintf(status, statusSize, "Bad download path");
+        return false;
+    }
+    if (!waitForWifiReady(5000)) {
+        if (status && statusSize > 0) snprintf(status, statusSize, "WiFi not connected");
+        return false;
+    }
+
+    HTTPClient http;
+    http.setTimeout(timeoutMs);
+    http.setConnectTimeout(10000);
+    http.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
+    WiFiClient plainClient;
+    WiFiClientSecure secureClient;
+    plainClient.setTimeout((timeoutMs + 999) / 1000);
+    secureClient.setTimeout((timeoutMs + 999) / 1000);
+    bool began = false;
+    if (strncmp(url, "https://", 8) == 0) {
+        secureClient.setInsecure();
+        began = http.begin(secureClient, url);
+    } else {
+        began = http.begin(plainClient, url);
+    }
+    if (!began) {
+        if (status && statusSize > 0) snprintf(status, statusSize, "Bad URL");
+        return false;
+    }
+
+    http.setReuse(false);
+    http.addHeader("Connection", "close");
+    http.addHeader("User-Agent", "T5-ePaper-S3/1.0");
+    int httpCode = http.GET();
+    if (httpCode != HTTP_CODE_OK) {
+        if (status && statusSize > 0) snprintf(status, statusSize, "HTTP %d", httpCode);
+        http.end();
+        return false;
+    }
+
+    File out = SD.open(path, FILE_WRITE);
+    if (!out) {
+        if (status && statusSize > 0) snprintf(status, statusSize, "SD open failed");
+        http.end();
+        return false;
+    }
+
+    uint8_t buffer[1024];
+    WiFiClient *stream = http.getStreamPtr();
+    int remaining = http.getSize();
+    uint32_t lastData = millis();
+    while (http.connected() && (remaining > 0 || remaining == -1)) {
+        size_t avail = stream->available();
+        if (avail) {
+            int readLen = stream->readBytes(buffer, min((size_t)sizeof(buffer), avail));
+            if (readLen > 0) {
+                out.write(buffer, readLen);
+                lastData = millis();
+                if (remaining > 0) remaining -= readLen;
+            }
+        } else {
+            if (millis() - lastData > timeoutMs) break;
+            delay(1);
+        }
+    }
+    out.close();
+    http.end();
+    if (remaining > 0) {
+        if (status && statusSize > 0) snprintf(status, statusSize, "Download incomplete");
+        return false;
+    }
+    if (status && statusSize > 0) snprintf(status, statusSize, "Downloaded");
     return true;
 }
 
@@ -6467,6 +7236,402 @@ static void processPendingStoryAutoSave()
 }
 
 
+// Kid Songs / Music Core functions
+static void buildMusicApiUrl(char *out, size_t outSize)
+{
+    if (!out || outSize == 0) return;
+    out[0] = '\0';
+    char query[64];
+    snprintf(query, sizeof(query), "?page=%ld&perPage=%d", (long)music_current_page, MAX_MUSIC_ITEMS);
+    buildContentApiUrl(out, outSize, "/api/kid-songs", query);
+}
+
+static void buildMusicDetailApiUrl(char *out, size_t outSize, int32_t songId)
+{
+    if (!out || outSize == 0) return;
+    out[0] = '\0';
+    if (songId <= 0) return;
+    char endpoint[48];
+    snprintf(endpoint, sizeof(endpoint), "/api/kid-songs/%ld", (long)songId);
+    buildContentApiUrl(out, outSize, endpoint, NULL);
+}
+
+static bool fetchMusicLibrary()
+{
+    if (WiFi.status() != WL_CONNECTED) {
+        if (loadSavedMusicFromSd()) {
+            music_total = music_count;
+            return true;
+        }
+        snprintf(music_library_status, sizeof(music_library_status), "WiFi not connected");
+        return false;
+    }
+    warmupContentServer();
+    int fetched_count = 0;
+    char url[320];
+    buildMusicApiUrl(url, sizeof(url));
+    if (url[0] == '\0') {
+        snprintf(music_library_status, sizeof(music_library_status), "Set Content URL first");
+        return false;
+    }
+    String payload;
+    bool loaded = false;
+    for (int attempt = 1; attempt <= 3 && !loaded; ++attempt) {
+        snprintf(music_library_status, sizeof(music_library_status), "Songs try %d/3...", attempt);
+        Serial.printf("Fetching music library (try %d/3): %s\n", attempt, url);
+        loaded = httpGetString(url, payload, music_library_status, sizeof(music_library_status), 8000);
+        if (!loaded && attempt < 3) { WiFiClient().stop(); delay(1200); }
+    }
+    if (!loaded) return false;
+    JsonDocument doc;
+    DeserializationError err = deserializeJson(doc, payload);
+    if (err) {
+        snprintf(music_library_status, sizeof(music_library_status), "JSON parse failed");
+        Serial.printf("Music JSON parse failed: %s\n", err.c_str());
+        return false;
+    }
+    JsonArray items = doc["items"].as<JsonArray>();
+    music_total = doc["total"] | 0;
+    if (items.isNull()) {
+        snprintf(music_library_status, sizeof(music_library_status), "No items in JSON");
+        return false;
+    }
+
+    // Fill the global list directly instead of using a large temporary array
+    // on the loop/touch stack.  The music item has long URL fields, and the
+    // extra stack pressure could reset the ESP32-S3 as soon as the music icon
+    // started fetching the list.
+    music_count = 0;
+    for (JsonObject item : items) {
+        if (fetched_count >= MAX_MUSIC_ITEMS) break;
+        MusicListItem &song = music_items[fetched_count];
+        song.id = item["id"] | 0;
+        copyJsonString(song.title, sizeof(song.title), item, "title", "Untitled");
+        copyJsonString(song.filename, sizeof(song.filename), item, "filename", "");
+        // Keep the library fetch lightweight: do not retain the MP3 URL here.
+        // The detail endpoint is fetched only when a row is played or saved.
+        song.audio_url[0] = '\0';
+        copyJsonString(song.source, sizeof(song.source), item, "source", "");
+        song.saved = isMusicSavedOnSd(song.id);
+        ++fetched_count;
+    }
+    if (fetched_count <= 0) {
+        snprintf(music_library_status, sizeof(music_library_status), "No songs found");
+        return false;
+    }
+    music_count = fetched_count;
+    snprintf(music_library_status, sizeof(music_library_status), "Loaded %d songs", music_count);
+    return true;
+}
+
+static bool buildMusicAudioDownloadUrl(const char *audioUrl, char *out, size_t outSize)
+{
+    if (!out || outSize == 0) return false;
+    out[0] = '\0';
+    if (!audioUrl || audioUrl[0] == '\0') return false;
+    if (strncmp(audioUrl, "http://", 7) == 0 || strncmp(audioUrl, "https://", 8) == 0) {
+        snprintf(out, outSize, "%s", audioUrl);
+        return true;
+    }
+    if (audioUrl[0] == '/') {
+        buildContentApiUrl(out, outSize, audioUrl, NULL);
+        return out[0] != '\0';
+    }
+    char endpoint[220];
+    snprintf(endpoint, sizeof(endpoint), "/%s", audioUrl);
+    buildContentApiUrl(out, outSize, endpoint, NULL);
+    return out[0] != '\0';
+}
+
+static bool isMusicSavedOnSd(int32_t songId)
+{
+    if (!ensureSdReady()) {
+        return false;
+    }
+    char path[64];
+    snprintf(path, sizeof(path), "%s/%ld/meta.txt", MUSIC_SD_FOLDER, (long)songId);
+    return SD.exists(path);
+}
+
+static bool loadMusicFromSd(int32_t songId, char *title, char *filename, char *audioPath, char *source)
+{
+    if (!ensureSdReady() || songId <= 0) {
+        return false;
+    }
+
+    char dirPath[32];
+    snprintf(dirPath, sizeof(dirPath), "%s/%ld", MUSIC_SD_FOLDER, (long)songId);
+
+    char metaPath[64];
+    snprintf(metaPath, sizeof(metaPath), "%s/meta.txt", dirPath);
+    File metaFile = SD.open(metaPath, FILE_READ);
+    if (!metaFile) {
+        return false;
+    }
+
+    metaFile.readStringUntil('\n'); // id
+    String t = metaFile.readStringUntil('\n');
+    String f = metaFile.readStringUntil('\n');
+    String s = metaFile.readStringUntil('\n');
+    t.trim();
+    f.trim();
+    s.trim();
+    metaFile.close();
+
+    if (f.length() == 0) {
+        return false;
+    }
+
+    char localPath[128];
+    snprintf(localPath, sizeof(localPath), "%s/%s", dirPath, f.c_str());
+    if (!SD.exists(localPath)) {
+        return false;
+    }
+
+    if (title) snprintf(title, 80, "%s", t.c_str());
+    if (filename) snprintf(filename, 80, "%s", f.c_str());
+    if (source) snprintf(source, 40, "%s", s.c_str());
+    if (audioPath) snprintf(audioPath, 180, "%s", localPath);
+    Serial.printf("Loaded selected music %ld from SD cache: %s\n", (long)songId, localPath);
+    return true;
+}
+
+static bool loadSavedMusicFromSd()
+{
+    if (!ensureSdReady()) {
+        return false;
+    }
+
+    File musicDir = SD.open(MUSIC_SD_FOLDER);
+    if (!musicDir || !musicDir.isDirectory()) {
+        return false;
+    }
+
+    music_count = 0;
+    File entry = musicDir.openNextFile();
+    while (entry && music_count < MAX_MUSIC_ITEMS) {
+        if (entry.isDirectory()) {
+            const char *entryName = entry.name();
+            const char *lastSlash = strrchr(entryName, '/');
+            int32_t songId = atoi(lastSlash ? lastSlash + 1 : entryName);
+            if (songId > 0) {
+                char title[80] = "";
+                char filename[80] = "";
+                char audioPath[180] = "";
+                char source[40] = "";
+                if (loadMusicFromSd(songId, title, filename, audioPath, source)) {
+                    MusicListItem &song = music_items[music_count];
+                    song.id = songId;
+                    snprintf(song.title, sizeof(song.title), "%s", title[0] ? title : filename);
+                    snprintf(song.filename, sizeof(song.filename), "%s", filename);
+                    snprintf(song.audio_url, sizeof(song.audio_url), "%s", audioPath);
+                    snprintf(song.source, sizeof(song.source), "%s", source);
+                    song.saved = true;
+                    music_count++;
+                }
+            }
+        }
+        entry.close();
+        entry = musicDir.openNextFile();
+    }
+    musicDir.close();
+
+    if (music_count > 0) {
+        snprintf(music_library_status, sizeof(music_library_status), "Loaded %d songs from SD", music_count);
+        return true;
+    }
+    return false;
+}
+
+static bool saveMusicToSd(int32_t songId, const char *title, const char *filename, const char *audioUrl, const char *source)
+{
+    if (songId <= 0 || !ensureSdReady()) return false;
+    if (!audioUrl || audioUrl[0] == '\0') return false;
+
+    if (!SD.exists(MUSIC_SD_FOLDER)) SD.mkdir(MUSIC_SD_FOLDER);
+    char dirPath[32];
+    snprintf(dirPath, sizeof(dirPath), "%s/%ld", MUSIC_SD_FOLDER, (long)songId);
+    if (!SD.exists(dirPath)) SD.mkdir(dirPath);
+
+    char downloadUrl[320];
+    if (!buildMusicAudioDownloadUrl(audioUrl, downloadUrl, sizeof(downloadUrl))) return false;
+
+    char safeName[96];
+    snprintf(safeName, sizeof(safeName), "%s", (filename && filename[0]) ? filename : "song.mp3");
+    for (size_t i = 0; safeName[i]; ++i) {
+        if (safeName[i] == '/' || safeName[i] == '\\' || safeName[i] == ':' || safeName[i] == '*' ||
+            safeName[i] == '?' || safeName[i] == '"' || safeName[i] == '<' || safeName[i] == '>' || safeName[i] == '|') {
+            safeName[i] = '_';
+        }
+    }
+    if (!strstr(safeName, ".mp3") && !strstr(safeName, ".MP3")) {
+        strncat(safeName, ".mp3", sizeof(safeName) - strlen(safeName) - 1);
+    }
+
+    char audioPath[128];
+    snprintf(audioPath, sizeof(audioPath), "%s/%s", dirPath, safeName);
+    if (SD.exists(audioPath)) SD.remove(audioPath);
+
+    char status[96];
+    snprintf(music_library_status, sizeof(music_library_status), "Saving music...");
+    Serial.printf("Downloading music %ld to SD: %s -> %s\n", (long)songId, downloadUrl, audioPath);
+    if (!httpDownloadToSdFile(downloadUrl, audioPath, status, sizeof(status), 90000)) {
+        Serial.printf("Music download failed: %s\n", status);
+        snprintf(music_library_status, sizeof(music_library_status), "%s", status);
+        if (SD.exists(audioPath)) SD.remove(audioPath);
+        return false;
+    }
+
+    char metaPath[64];
+    snprintf(metaPath, sizeof(metaPath), "%s/meta.txt", dirPath);
+    if (SD.exists(metaPath)) SD.remove(metaPath);
+    File metaFile = SD.open(metaPath, FILE_WRITE);
+    if (!metaFile) return false;
+    metaFile.printf("%ld\n%s\n%s\n%s\n%s\n", (long)songId, title ? title : "", safeName, source ? source : "", audioUrl);
+    metaFile.close();
+    snprintf(music_library_status, sizeof(music_library_status), "Saved music");
+    Serial.printf("Music %ld saved to SD card\n", (long)songId);
+    return true;
+}
+
+static bool fetchAndSaveMusicItem(MusicListItem &song)
+{
+    if (song.id <= 0) return false;
+    if (song.saved || loadMusicFromSd(song.id, song.title, song.filename, song.audio_url, song.source)) {
+        song.saved = true;
+        return true;
+    }
+    if (WiFi.status() != WL_CONNECTED) return false;
+
+    int32_t oldSelectedId = selected_music_id;
+    char oldTitle[sizeof(selected_music_title)];
+    char oldFilename[sizeof(selected_music_filename)];
+    char oldUrl[sizeof(selected_music_url)];
+    char oldSource[sizeof(selected_music_source)];
+    snprintf(oldTitle, sizeof(oldTitle), "%s", selected_music_title);
+    snprintf(oldFilename, sizeof(oldFilename), "%s", selected_music_filename);
+    snprintf(oldUrl, sizeof(oldUrl), "%s", selected_music_url);
+    snprintf(oldSource, sizeof(oldSource), "%s", selected_music_source);
+
+    bool ok = false;
+    selected_music_id = song.id;
+    snprintf(selected_music_title, sizeof(selected_music_title), "%s", song.title);
+    snprintf(selected_music_filename, sizeof(selected_music_filename), "%s", song.filename);
+    snprintf(selected_music_source, sizeof(selected_music_source), "%s", song.source);
+    selected_music_url[0] = '\0';
+    if (fetchSelectedMusic(song.id)) {
+        // fetchSelectedMusic() already performs the online detail fetch,
+        // downloads the MP3 to /music/<id>/, and reloads selected_music_url as
+        // the local SD path. Do not call saveMusicToSd() a second time with
+        // that local path.
+        ok = true;
+        snprintf(song.title, sizeof(song.title), "%s", selected_music_title);
+        snprintf(song.filename, sizeof(song.filename), "%s", selected_music_filename);
+        snprintf(song.audio_url, sizeof(song.audio_url), "%s", selected_music_url);
+        snprintf(song.source, sizeof(song.source), "%s", selected_music_source);
+        song.saved = true;
+    }
+
+    selected_music_id = oldSelectedId;
+    snprintf(selected_music_title, sizeof(selected_music_title), "%s", oldTitle);
+    snprintf(selected_music_filename, sizeof(selected_music_filename), "%s", oldFilename);
+    snprintf(selected_music_url, sizeof(selected_music_url), "%s", oldUrl);
+    snprintf(selected_music_source, sizeof(selected_music_source), "%s", oldSource);
+    return ok;
+}
+
+static bool fetchSelectedMusic(int32_t songId)
+{
+    if (loadMusicFromSd(songId, selected_music_title, selected_music_filename, selected_music_url, selected_music_source)) {
+        selected_music_id = songId;
+        snprintf(music_player_status, sizeof(music_player_status), "Loaded from SD");
+        return true;
+    }
+
+    if (WiFi.status() != WL_CONNECTED) {
+        snprintf(music_player_status, sizeof(music_player_status), "WiFi not connected");
+        return false;
+    }
+    warmupContentServer();
+    char url[320];
+    buildMusicDetailApiUrl(url, sizeof(url), songId);
+    if (url[0] == '\0') {
+        snprintf(music_player_status, sizeof(music_player_status), "Set Content URL first");
+        return false;
+    }
+    String payload;
+    bool loaded = false;
+    for (int attempt = 1; attempt <= 3 && !loaded; ++attempt) {
+        snprintf(music_player_status, sizeof(music_player_status), "Song try %d/3...", attempt);
+        Serial.printf("Fetching selected song (try %d/3): %s\n", attempt, url);
+        loaded = httpGetString(url, payload, music_player_status, sizeof(music_player_status), 20000);
+        if (!loaded && attempt < 3) { WiFiClient().stop(); delay(1200); }
+    }
+    if (!loaded) return false;
+    JsonDocument doc;
+    DeserializationError err = deserializeJson(doc, payload);
+    if (err) {
+        snprintf(music_player_status, sizeof(music_player_status), "Song JSON failed");
+        Serial.printf("Song detail JSON parse failed: %s\n", err.c_str());
+        return false;
+    }
+    JsonObject item = doc.as<JsonObject>();
+    selected_music_id = item["id"] | songId;
+    copyJsonString(selected_music_title, sizeof(selected_music_title), item, "title", "Untitled");
+    copyJsonString(selected_music_filename, sizeof(selected_music_filename), item, "filename", "");
+    copyJsonString(selected_music_url, sizeof(selected_music_url), item, "audio_url", "");
+    copyJsonString(selected_music_source, sizeof(selected_music_source), item, "source", "");
+    if (selected_music_url[0] == '\0') {
+        snprintf(music_player_status, sizeof(music_player_status), "No audio URL");
+        return false;
+    }
+
+    // Match books/voice stories: once a song is selected online, immediately
+    // persist the MP3 to SD and play from the local cached path. This lets the
+    // same song work later when WiFi is unavailable.
+    if (!saveMusicToSd(selected_music_id, selected_music_title, selected_music_filename, selected_music_url, selected_music_source)) {
+        snprintf(music_player_status, sizeof(music_player_status), "Save failed");
+        return false;
+    }
+    if (!loadMusicFromSd(selected_music_id, selected_music_title, selected_music_filename, selected_music_url, selected_music_source)) {
+        snprintf(music_player_status, sizeof(music_player_status), "SD load failed");
+        return false;
+    }
+    for (int i = 0; i < music_count; ++i) {
+        if (music_items[i].id == selected_music_id) {
+            music_items[i].saved = true;
+            snprintf(music_items[i].title, sizeof(music_items[i].title), "%s", selected_music_title);
+            snprintf(music_items[i].filename, sizeof(music_items[i].filename), "%s", selected_music_filename);
+            snprintf(music_items[i].audio_url, sizeof(music_items[i].audio_url), "%s", selected_music_url);
+            snprintf(music_items[i].source, sizeof(music_items[i].source), "%s", selected_music_source);
+            break;
+        }
+    }
+    snprintf(music_player_status, sizeof(music_player_status), "Loaded from SD");
+    return selected_music_url[0] != '\0';
+}
+
+static bool handleMusicPlayerTouch(int16_t tx, int16_t ty)
+{
+    int32_t px = 0, py = 0;
+    if (!portraitPointFromTouch(tx, ty, &px, &py, true)) {
+        if (!portraitPointFromTouch(tx, ty, &px, &py, false)) return false;
+    }
+    if (!pointInRect(px, py, STORY_PLAYER_BUTTON_X, STORY_PLAYER_BUTTON_Y, STORY_PLAYER_BUTTON_W, STORY_PLAYER_BUTTON_H)) return false;
+    if (selected_music_url[0] == '\0') {
+        music_player_status[0] = '\0';
+        refreshMusicPlayerHeaderArea();
+        if (selected_music_id > 0 && fetchSelectedMusic(selected_music_id)) music_playing = true;
+        refreshMusicPlayerHeaderArea();
+        return true;
+    }
+    music_playing = !music_playing;
+    snprintf(music_player_status, sizeof(music_player_status), "%s", music_playing ? "正在播放" : "已暂停");
+    refreshMusicPlayerHeaderArea();
+    return true;
+}
+
+
 uint32_t pressed_cnt = 0;
 void buttonPressed(Button2 &b)
 {
@@ -6682,6 +7847,10 @@ void loop()
             refreshDisplayExtended(drawVoiceStoryLibraryScreen, true);
         } else if (showingVoiceStoryReader) {
             refreshDisplayExtended(drawVoiceStoryReaderScreen, true);
+        } else if (showingMusicLibrary) {
+            refreshDisplayExtended(drawMusicLibraryScreen, true);
+        } else if (showingMusicPlayer) {
+            refreshDisplayExtended(drawMusicPlayerScreen, true);
         } else if (showingSdMenu) {
             refreshDisplayExtended(drawSdMenuScreen, true);
         } else if (showingSdFolder) {
