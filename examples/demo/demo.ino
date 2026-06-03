@@ -122,6 +122,7 @@ int16_t latchedTouchY = 0;
 int16_t releasedTouchX = 0;
 int16_t releasedTouchY = 0;
 uint32_t lastTouchReleaseTime = 0;
+volatile bool homeAbortRequested = false;
 
 #define MAX_SCANNED_WIFI 10
 char scanned_ssids[MAX_SCANNED_WIFI][33];
@@ -373,6 +374,7 @@ static bool writeWavHeader(File &file, uint32_t dataBytes, uint32_t sampleRate, 
 static void buildBookDetailApiUrl(char *out, size_t outSize, int32_t bookId);
 static void buildVoiceStoryDetailApiUrl(char *out, size_t outSize, int32_t storyId);
 static void buildVoiceStoryTtsApiUrl(char *out, size_t outSize, int32_t storyId);
+static void buildVoiceStoryTtsWavApiUrl(char *out, size_t outSize, int32_t storyId);
 static void buildContentApiUrl(char *out, size_t outSize, const char *endpoint, const char *query = NULL);
 static bool httpGetString(const char *url, String &payload, char *status, size_t statusSize, uint32_t timeoutMs = 10000);
 static bool httpDownloadToSdFile(const char *url, const char *path, char *status, size_t statusSize, uint32_t timeoutMs = 60000);
@@ -398,6 +400,9 @@ static bool handleContentSettingsTouch(int16_t tx, int16_t ty);
 static bool handleVoiceStoryReaderTouch(int16_t tx, int16_t ty);
 static bool touchHitsVoiceStoryTile(int16_t tx, int16_t ty);
 static bool touchHitsMusicTile(int16_t tx, int16_t ty);
+static bool serviceHomeAbortTouch();
+static bool abortableDelay(uint32_t delayMs);
+static void enterHomeImmediately();
 static void processTouchRelease(int16_t startX, int16_t startY, int16_t endX, int16_t endY);
 static bool handleBookSwipe(int16_t startX, int16_t startY, int16_t endX, int16_t endY);
 static bool getPortraitSwipeDelta(int16_t startX, int16_t startY, int16_t endX, int16_t endY, int32_t *dx, int32_t *dy);
@@ -3212,7 +3217,9 @@ static bool handleVoiceStoryReaderTouch(int16_t tx, int16_t ty)
         snprintf(story_reader_status, sizeof(story_reader_status), "Loading story...");
         refreshVoiceStoryPlayerHeaderArea();
         if (selected_story_id > 0 && fetchSelectedVoiceStory(selected_story_id)) {
+            if (homeAbortRequested) return true;
             story_playing = prepareAndStartStoryAudio(selected_story_id);
+            if (homeAbortRequested) return true;
             // Loading from the player button changes only the player/title
             // header; keep the visible story list below untouched.
             refreshVoiceStoryPlayerHeaderArea();
@@ -3228,6 +3235,7 @@ static bool handleVoiceStoryReaderTouch(int16_t tx, int16_t ty)
         story_playing = false;
     } else {
         story_playing = prepareAndStartStoryAudio(selected_story_id);
+        if (homeAbortRequested) return true;
     }
     snprintf(story_reader_status, sizeof(story_reader_status), "%s", story_playing ? "正在播放" : "已暂停");
     refreshVoiceStoryPlayerHeaderArea();
@@ -5152,6 +5160,73 @@ static bool touchHitsHomeStatusIcon(int16_t tx, int16_t ty)
     return touchHitsPortraitRect(tx, ty, 0, 0, 88, 56);
 }
 
+static bool serviceHomeAbortTouch()
+{
+    if (homeAbortRequested) {
+        return true;
+    }
+    if (!touchOnline) {
+        return false;
+    }
+
+    int16_t tx = 0;
+    int16_t ty = 0;
+    if (touch.getPoint(&tx, &ty, 1) && touchHitsHomeStatusIcon(tx, ty)) {
+        Serial.println("Home abort requested");
+        homeAbortRequested = true;
+        stopAudioPlayback();
+        story_playing = false;
+        music_playing = false;
+        touchWasPressed = false;
+        touchLatchActive = false;
+        touch_loop_interval = millis() + 300;
+        return true;
+    }
+    return false;
+}
+
+static bool abortableDelay(uint32_t delayMs)
+{
+    uint32_t start = millis();
+    while (millis() - start < delayMs) {
+        if (serviceHomeAbortTouch()) {
+            return true;
+        }
+        uint32_t elapsed = (uint32_t)(millis() - start);
+        uint32_t remaining = delayMs > elapsed ? delayMs - elapsed : 0;
+        delay(remaining > 20 ? 20 : remaining);
+    }
+    return homeAbortRequested;
+}
+
+static void enterHomeImmediately()
+{
+    Serial.println("Entering Home immediately");
+    homeAbortRequested = false;
+    showingClock = false;
+    showingCalculator = false;
+    showingSettings = false;
+    showingSettingsMenu = false;
+    showingContentSettings = false;
+    showingBookLibrary = false;
+    showingBookReader = false;
+    showingVoiceStoryLibrary = false;
+    showingVoiceStoryReader = false;
+    showingMusicLibrary = false;
+    showingMusicPlayer = false;
+    showingSdMenu = false;
+    showingSdFolder = false;
+    show_password_prompt = false;
+    story_playing = false;
+    music_playing = false;
+    pending_book_auto_save = false;
+    pending_story_auto_save = false;
+    pressedHomeIcon = 0;
+    stopAudioPlayback();
+    refreshDisplayExtended(drawPortraitHome, true, 80);
+    touch_loop_interval = millis() + 300;
+}
+
 static bool touchHitsSettingsTile(int16_t tx, int16_t ty)
 {
     const int32_t settingsX = homeIconStartX();
@@ -5358,29 +5433,8 @@ static void processTouchRelease(int16_t startX, int16_t startY, int16_t endX, in
     const int16_t x = startX;
     const int16_t y = startY;
     if ((showingClock || showingCalculator || showingSettings || showingSettingsMenu || showingContentSettings || showingBookLibrary || showingBookReader || showingVoiceStoryLibrary || showingVoiceStoryReader || showingMusicLibrary || showingMusicPlayer || showingSdMenu || showingSdFolder) && touchHitsHomeStatusIcon(x, y)) {
-        showingClock = false;
-        showingCalculator = false;
-        showingSettings = false;
-        showingSettingsMenu = false;
-        showingContentSettings = false;
-        showingBookLibrary = false;
-        showingBookReader = false;
-        showingVoiceStoryLibrary = false;
-        showingVoiceStoryReader = false;
-        showingMusicLibrary = false;
-        showingMusicPlayer = false;
-        story_playing = false;
-        music_playing = false;
-        stopAudioPlayback();
-        showingSdMenu = false;
-        showingSdFolder = false;
-        show_password_prompt = false;
-        // Returning to Home from another full-screen app can leave visible
-        // ghosting, especially after the dense Clock screen.  Use one
-        // compensated refresh with double-length black/white pulses instead
-        // of two separate refreshes, so it clears strongly but returns faster.
-        refreshDisplayExtended(drawPortraitHome, true, 120);
-        touch_loop_interval = millis() + 300;
+        homeAbortRequested = true;
+        enterHomeImmediately();
         return;
     }
 
@@ -6141,6 +6195,10 @@ static void buildContentApiUrl(char *out, size_t outSize, const char *endpoint, 
 
 static bool httpGetString(const char *url, String &payload, char *status, size_t statusSize, uint32_t timeoutMs)
 {
+    if (serviceHomeAbortTouch()) {
+        if (status && statusSize > 0) snprintf(status, statusSize, "Home abort");
+        return false;
+    }
     if (!url || url[0] == '\0') {
         if (status && statusSize > 0) snprintf(status, statusSize, "Set Content URL first");
         return false;
@@ -6174,25 +6232,41 @@ static bool httpGetString(const char *url, String &payload, char *status, size_t
     http.setReuse(false);
     http.addHeader("Connection", "close");
     http.addHeader("User-Agent", "T5-ePaper-S3/1.0");
-    delay(30);
+    if (abortableDelay(30)) {
+        http.end();
+        if (status && statusSize > 0) snprintf(status, statusSize, "Home abort");
+        return false;
+    }
     int httpCode = http.GET();
+    if (serviceHomeAbortTouch()) {
+        http.end();
+        if (status && statusSize > 0) snprintf(status, statusSize, "Home abort");
+        return false;
+    }
     if (httpCode != HTTP_CODE_OK) {
         String err = http.errorToString(httpCode);
         if (status && statusSize > 0) snprintf(status, statusSize, "HTTP %d %s", httpCode, err.c_str());
         Serial.printf("HTTP GET failed (%d): %s\n", httpCode, err.c_str());
         http.end();
-        delay(100);
+        abortableDelay(100);
         return false;
     }
 
     payload = http.getString();
     http.end();
-    delay(80);
+    if (abortableDelay(80)) {
+        if (status && statusSize > 0) snprintf(status, statusSize, "Home abort");
+        return false;
+    }
     return true;
 }
 
 static bool httpDownloadToSdFile(const char *url, const char *path, char *status, size_t statusSize, uint32_t timeoutMs)
 {
+    if (serviceHomeAbortTouch()) {
+        if (status && statusSize > 0) snprintf(status, statusSize, "Home abort");
+        return false;
+    }
     if (!url || url[0] == '\0' || !path || path[0] == '\0') {
         if (status && statusSize > 0) snprintf(status, statusSize, "Bad download path");
         return false;
@@ -6226,6 +6300,11 @@ static bool httpDownloadToSdFile(const char *url, const char *path, char *status
     http.addHeader("Connection", "close");
     http.addHeader("User-Agent", "T5-ePaper-S3/1.0");
     int httpCode = http.GET();
+    if (serviceHomeAbortTouch()) {
+        http.end();
+        if (status && statusSize > 0) snprintf(status, statusSize, "Home abort");
+        return false;
+    }
     if (httpCode != HTTP_CODE_OK) {
         if (status && statusSize > 0) snprintf(status, statusSize, "HTTP %d", httpCode);
         http.end();
@@ -6244,6 +6323,13 @@ static bool httpDownloadToSdFile(const char *url, const char *path, char *status
     int remaining = http.getSize();
     uint32_t lastData = millis();
     while (http.connected() && (remaining > 0 || remaining == -1)) {
+        if (serviceHomeAbortTouch()) {
+            if (status && statusSize > 0) snprintf(status, statusSize, "Home abort");
+            out.close();
+            http.end();
+            if (SD.exists(path)) SD.remove(path);
+            return false;
+        }
         size_t avail = stream->available();
         if (avail) {
             int readLen = stream->readBytes(buffer, min((size_t)sizeof(buffer), avail));
@@ -6254,7 +6340,13 @@ static bool httpDownloadToSdFile(const char *url, const char *path, char *status
             }
         } else {
             if (millis() - lastData > timeoutMs) break;
-            delay(1);
+            if (abortableDelay(1)) {
+                if (status && statusSize > 0) snprintf(status, statusSize, "Home abort");
+                out.close();
+                http.end();
+                if (SD.exists(path)) SD.remove(path);
+                return false;
+            }
         }
     }
     out.close();
@@ -6271,7 +6363,9 @@ static bool waitForWifiReady(uint32_t timeoutMs)
 {
     uint32_t start = millis();
     while (WiFi.status() != WL_CONNECTED && millis() - start < timeoutMs) {
-        delay(100);
+        if (abortableDelay(100)) {
+            return false;
+        }
     }
     if (WiFi.status() != WL_CONNECTED) {
         return false;
@@ -6280,13 +6374,18 @@ static bool waitForWifiReady(uint32_t timeoutMs)
     // Give DNS/TCP/IP stack a short settle time after the GOT_IP event. HTTP -1
     // on ESP32 often occurs when the first client starts immediately after WiFi.
     if (WiFi.localIP() == IPAddress((uint32_t)0)) {
-        delay(250);
+        if (abortableDelay(250)) {
+            return false;
+        }
     }
     return true;
 }
 
 static void warmupContentServer(bool force)
 {
+    if (serviceHomeAbortTouch()) {
+        return;
+    }
     if (!force && contentServerWarmed) {
         return;
     }
@@ -6338,6 +6437,7 @@ static void urlEncodeSpaces(char *text)
 static bool fetchClockWeatherInfo()
 {
     warmupContentServer();
+    if (homeAbortRequested) return false;
     clock_weather.loaded = false;
     snprintf(clock_weather.status, sizeof(clock_weather.status), "Syncing clock/weather...");
     snprintf(clock_weather.city, sizeof(clock_weather.city), "Shenzhen");
@@ -6378,8 +6478,9 @@ static bool fetchClockWeatherInfo()
         payload = "";
         snprintf(clock_weather.status, sizeof(clock_weather.status), "Weather try %d/3...", attempt);
         weatherOk = httpGetString(url, payload, clock_weather.status, sizeof(clock_weather.status), 45000);
+        if (homeAbortRequested) return false;
         if (!weatherOk && attempt < 3) {
-            delay(2500);
+            if (abortableDelay(2500)) return false;
         }
     }
 
@@ -6391,8 +6492,9 @@ static bool fetchClockWeatherInfo()
             payload = "";
             snprintf(clock_weather.status, sizeof(clock_weather.status), "Weather fallback %d/2...", attempt);
             weatherOk = httpGetString(url, payload, clock_weather.status, sizeof(clock_weather.status), 45000);
+            if (homeAbortRequested) return false;
             if (!weatherOk && attempt < 2) {
-                delay(2500);
+                if (abortableDelay(2500)) return false;
             }
         }
     }
@@ -6441,6 +6543,7 @@ static void updateBookReaderPagination()
 
 static bool fetchSelectedBook(int32_t bookId)
 {
+    if (serviceHomeAbortTouch()) return false;
     if (loadBookFromSd(bookId, selected_book_title, selected_book_author, selected_book_category, &selected_book_content)) {
         selected_book_id = bookId;
         book_reader_page = 0;
@@ -6456,6 +6559,7 @@ static bool fetchSelectedBook(int32_t bookId)
     }
 
     warmupContentServer();
+    if (homeAbortRequested) return false;
 
     char url[320];
     buildBookDetailApiUrl(url, sizeof(url), bookId);
@@ -6470,9 +6574,10 @@ static bool fetchSelectedBook(int32_t bookId)
         snprintf(book_reader_status, sizeof(book_reader_status), "Book try %d/3...", attempt);
         Serial.printf("Fetching selected book (try %d/3): %s\n", attempt, url);
         loaded = httpGetString(url, payload, book_reader_status, sizeof(book_reader_status), 20000);
+        if (homeAbortRequested) return false;
         if (!loaded && attempt < 3) {
             WiFiClient().stop();
-            delay(1200);
+            if (abortableDelay(1200)) return false;
         }
     }
     if (!loaded) {
@@ -6612,11 +6717,13 @@ static bool saveBookToSd(int32_t bookId, const char *title, const char *author, 
 
 static bool fetchAndSaveBookItem(BookListItem &book)
 {
+    if (serviceHomeAbortTouch()) return false;
     if (WiFi.status() != WL_CONNECTED || book.id <= 0) {
         return false;
     }
 
     warmupContentServer();
+    if (homeAbortRequested) return false;
 
     char url[320];
     buildBookDetailApiUrl(url, sizeof(url), book.id);
@@ -6630,9 +6737,10 @@ static bool fetchAndSaveBookItem(BookListItem &book)
     for (int attempt = 1; attempt <= 3 && !loaded; ++attempt) {
         Serial.printf("Saving book %ld in background (try %d/3): %s\n", (long)book.id, attempt, url);
         loaded = httpGetString(url, payload, status, sizeof(status), 20000);
+        if (homeAbortRequested) return false;
         if (!loaded && attempt < 3) {
             WiFiClient().stop();
-            delay(1200);
+            if (abortableDelay(1200)) return false;
         }
     }
     if (!loaded) {
@@ -6758,6 +6866,7 @@ static bool loadSavedBooksFromSd()
 
 static bool fetchBookLibrary()
 {
+    if (serviceHomeAbortTouch()) return false;
     // Try loading from SD card first when WiFi is not available
     if (WiFi.status() != WL_CONNECTED) {
         if (loadSavedBooksFromSd()) {
@@ -6769,6 +6878,7 @@ static bool fetchBookLibrary()
     }
 
     warmupContentServer();
+    if (homeAbortRequested) return false;
 
     BookListItem fetched_items[MAX_BOOK_ITEMS];
     int fetched_count = 0;
@@ -6787,9 +6897,10 @@ static bool fetchBookLibrary()
         snprintf(book_library_status, sizeof(book_library_status), "Books try %d/3...", attempt);
         Serial.printf("Fetching book library (try %d/3): %s\n", attempt, url);
         loaded = httpGetString(url, payload, book_library_status, sizeof(book_library_status), 20000);
+        if (homeAbortRequested) return false;
         if (!loaded && attempt < 3) {
             WiFiClient().stop();
-            delay(1200);
+            if (abortableDelay(1200)) return false;
         }
     }
     if (!loaded) {
@@ -6903,6 +7014,16 @@ static void buildVoiceStoryTtsApiUrl(char *out, size_t outSize, int32_t storyId)
     buildContentApiUrl(out, outSize, endpoint, NULL);
 }
 
+static void buildVoiceStoryTtsWavApiUrl(char *out, size_t outSize, int32_t storyId)
+{
+    if (!out || outSize == 0) return;
+    out[0] = '\0';
+    if (storyId <= 0) return;
+    char endpoint[64];
+    snprintf(endpoint, sizeof(endpoint), "/api/voice-stories/%ld/tts", (long)storyId);
+    buildContentApiUrl(out, outSize, endpoint, NULL);
+}
+
 static bool isValidAudioFile(const char *path)
 {
     if (!path || path[0] == '\0' || !ensureSdReady() || !SD.exists(path)) return false;
@@ -7008,8 +7129,66 @@ static bool localTtsHeapLooksSafe()
     return true;
 }
 
+static bool localTtsVoiceLooksUsable(const esp_tts_voice_t *voice)
+{
+    if (!voice) {
+        return false;
+    }
+
+    Serial.printf("Local ESP-TTS voice: sample_rate=%d data=%p sylls=%p syll_pos=%p pinyin_idx=%p\n",
+                  voice->sample_rate,
+                  voice->data,
+                  voice->sylls,
+                  voice->syll_pos,
+                  voice->pinyin_idx);
+
+    if (voice->sample_rate <= 0 || !voice->sylls || !voice->syll_pos || !voice->pinyin_idx) {
+        Serial.println("Local ESP-TTS voice has invalid metadata pointers");
+        return false;
+    }
+
+    return true;
+}
+
+static esp_tts_voice_t *createLocalTtsVoiceSet()
+{
+    if (!localTtsVoiceLooksUsable(&esp_tts_voice_xiaole)) {
+        snprintf(story_reader_status, sizeof(story_reader_status), "TTS voice bad");
+        return NULL;
+    }
+
+    // Espressif's esp-tts flow creates a runtime voice set before esp_tts_create().
+    // In IDF examples the second argument is model/voice data mapped from a model
+    // partition. This Arduino build links libvoice_set_xiaole.a directly, so the
+    // exported esp_tts_voice_xiaole already carries its bundled metadata. Prefer
+    // that object as the template with NULL external data instead of mixing the
+    // generic esp_tts_voice_template with a guessed .data pointer.
+    esp_tts_voice_t *voice = esp_tts_voice_set_init(&esp_tts_voice_xiaole, NULL);
+    if (voice) {
+        Serial.println("Local ESP-TTS voice initialized from bundled Xiaole voice");
+        return voice;
+    }
+
+    // Some esp-tts library revisions still expect a non-NULL data pointer even
+    // when the linked voice object is used as the template. Fall back cleanly,
+    // but never proceed into parse/play if both initialization styles fail.
+    if (esp_tts_voice_xiaole.data) {
+        Serial.println("Local ESP-TTS NULL-data init failed; retrying with Xiaole data pointer");
+        voice = esp_tts_voice_set_init(&esp_tts_voice_xiaole, (void *)esp_tts_voice_xiaole.data);
+    }
+
+    if (!voice) {
+        snprintf(story_reader_status, sizeof(story_reader_status), "TTS voice failed");
+        Serial.println("Local ESP-TTS voice initialization failed");
+    }
+    return voice;
+}
+
 static bool appendTtsChunkToWav(esp_tts_handle_t ttsHandle, const char *chunk, File &wavFile, uint32_t *dataBytes)
 {
+    if (serviceHomeAbortTouch()) {
+        return false;
+    }
     if (!ttsHandle || !chunk || chunk[0] == '\0' || !dataBytes) {
         return false;
     }
@@ -7020,23 +7199,44 @@ static bool appendTtsChunkToWav(esp_tts_handle_t ttsHandle, const char *chunk, F
         return false;
     }
 
-    while (true) {
+    const uint32_t bytesBefore = *dataBytes;
+    int emptyFrames = 0;
+    while (emptyFrames < 8) {
+        if (serviceHomeAbortTouch()) {
+            esp_tts_stream_reset(ttsHandle);
+            return false;
+        }
         int len = 0;
         short *pcm = esp_tts_stream_play(ttsHandle, &len, 4);
         if (!pcm || len <= 0) {
-            break;
+            emptyFrames++;
+            if (abortableDelay(1)) {
+                esp_tts_stream_reset(ttsHandle);
+                return false;
+            }
+            continue;
         }
+        emptyFrames = 0;
         const size_t bytes = (size_t)len * sizeof(short);
-        wavFile.write((const uint8_t *)pcm, bytes);
+        size_t written = wavFile.write((const uint8_t *)pcm, bytes);
+        if (written != bytes) {
+            Serial.printf("TTS WAV write short: expected=%u written=%u\n", (unsigned)bytes, (unsigned)written);
+            esp_tts_stream_reset(ttsHandle);
+            return false;
+        }
         *dataBytes += bytes;
-        delay(1);
+        if (abortableDelay(1)) {
+            esp_tts_stream_reset(ttsHandle);
+            return false;
+        }
     }
     esp_tts_stream_reset(ttsHandle);
-    return true;
+    return *dataBytes > bytesBefore;
 }
 
 static bool synthesizeStoryTtsToSd_internal(int32_t storyId, const char *text, char *audioPath, size_t audioPathSize)
 {
+    if (serviceHomeAbortTouch()) return false;
     if (!audioPath || audioPathSize == 0 || storyId <= 0 || !text || text[0] == '\0' || !ensureSdReady()) {
         return false;
     }
@@ -7057,23 +7257,8 @@ static bool synthesizeStoryTtsToSd_internal(int32_t storyId, const char *text, c
     snprintf(story_reader_status, sizeof(story_reader_status), "本机语音生成...");
     Serial.printf("Generating local esp-tts WAV for story %ld -> %s\n", (long)storyId, path);
 
-    // Espressif's esp-tts reference initializes the voice from a template plus
-    // a voice-data pointer, usually mapped from a model partition:
-    //   esp_tts_voice_set_init(&esp_tts_voice_template, voicedata)
-    // Our bundled libvoice_set_xiaole.a embeds the xiaole voice-data pointer in
-    // esp_tts_voice_xiaole.data, so pass that data explicitly instead of NULL.
-    // Passing NULL can make esp_tts_voice_set_init() create an invalid voice set
-    // and crash later when parse/play dereferences voice->data.
-    void *xiaoleVoiceData = (void *)esp_tts_voice_xiaole.data;
-    if (!xiaoleVoiceData) {
-        snprintf(story_reader_status, sizeof(story_reader_status), "TTS data missing");
-        Serial.println("Local ESP-TTS xiaole voice data pointer is NULL");
-        return false;
-    }
-
-    esp_tts_voice_t *ttsVoice = esp_tts_voice_set_init(&esp_tts_voice_template, xiaoleVoiceData);
+    esp_tts_voice_t *ttsVoice = createLocalTtsVoiceSet();
     if (!ttsVoice) {
-        snprintf(story_reader_status, sizeof(story_reader_status), "TTS voice failed");
         return false;
     }
 
@@ -7102,17 +7287,25 @@ static bool synthesizeStoryTtsToSd_internal(int32_t storyId, const char *text, c
     bool generatedAny = false;
 
     while (*p) {
+        if (serviceHomeAbortTouch()) {
+            wavFile.close();
+            esp_tts_destroy(ttsHandle);
+            esp_tts_voice_set_free(ttsVoice);
+            if (SD.exists(path)) SD.remove(path);
+            return false;
+        }
         const char *cpStart = p;
         uint32_t cp = 0;
         if (!utf8NextCodepoint(&p, &cp)) break;
         size_t cpBytes = (size_t)(p - cpStart);
 
-        bool boundary = (cp == '\n' || cp == '\r' || cp == 0x3002 || cp == 0xFF01 || cp == 0xFF1F || cp == 0xFF1B || cp == 0xFF0C || cp == ',' || cp == '.' || cp == '!' || cp == '?' || cp == ';');
+        bool boundary = (cp == '\n' || cp == '\r' || cp == 0x3002 || cp == 0xFF01 || cp == 0xFF1F || cp == 0xFF1B || cp == 0xFF0C || cp == 0x3001 || cp == ',' || cp == '.' || cp == '!' || cp == '?' || cp == ';');
         if (cp == '\r') continue;
 
         if (chunkLen + cpBytes >= sizeof(chunk) - 1) {
             chunk[chunkLen] = '\0';
-            generatedAny = appendTtsChunkToWav(ttsHandle, chunk, wavFile, &dataBytes) || generatedAny;
+            bool chunkOk = appendTtsChunkToWav(ttsHandle, chunk, wavFile, &dataBytes);
+            generatedAny = chunkOk || generatedAny;
             chunkLen = 0;
         }
 
@@ -7124,14 +7317,16 @@ static bool synthesizeStoryTtsToSd_internal(int32_t storyId, const char *text, c
 
         if (boundary && chunkLen > 0) {
             chunk[chunkLen] = '\0';
-            generatedAny = appendTtsChunkToWav(ttsHandle, chunk, wavFile, &dataBytes) || generatedAny;
+            bool chunkOk = appendTtsChunkToWav(ttsHandle, chunk, wavFile, &dataBytes);
+            generatedAny = chunkOk || generatedAny;
             chunkLen = 0;
         }
     }
 
     if (chunkLen > 0) {
         chunk[chunkLen] = '\0';
-        generatedAny = appendTtsChunkToWav(ttsHandle, chunk, wavFile, &dataBytes) || generatedAny;
+        bool chunkOk = appendTtsChunkToWav(ttsHandle, chunk, wavFile, &dataBytes);
+        generatedAny = chunkOk || generatedAny;
     }
 
     wavFile.seek(0);
@@ -7195,6 +7390,7 @@ static bool synthesizeStoryTtsToSd(int32_t storyId, const char *text, char *audi
 
 static bool downloadStoryAudioToSd(int32_t storyId, char *audioPath, size_t audioPathSize)
 {
+    if (serviceHomeAbortTouch()) return false;
     if (!audioPath || audioPathSize == 0 || storyId <= 0 || !ensureSdReady()) return false;
     if (loadStoryAudioFromSd(storyId, audioPath, audioPathSize)) return true;
     if (WiFi.status() != WL_CONNECTED) {
@@ -7237,8 +7433,54 @@ static bool downloadStoryAudioToSd(int32_t storyId, char *audioPath, size_t audi
     return true;
 }
 
+static bool downloadStoryWavAudioToSd(int32_t storyId, char *audioPath, size_t audioPathSize)
+{
+    if (serviceHomeAbortTouch()) return false;
+    if (!audioPath || audioPathSize == 0 || storyId <= 0 || !ensureSdReady()) return false;
+    if (loadStoryAudioFromSd(storyId, audioPath, audioPathSize)) return true;
+    if (WiFi.status() != WL_CONNECTED) {
+        snprintf(story_reader_status, sizeof(story_reader_status), "WiFi not connected");
+        return false;
+    }
+
+    if (!SD.exists(STORY_SD_FOLDER)) SD.mkdir(STORY_SD_FOLDER);
+    char dirPath[32];
+    snprintf(dirPath, sizeof(dirPath), "%s/%ld", STORY_SD_FOLDER, (long)storyId);
+    if (!SD.exists(dirPath)) SD.mkdir(dirPath);
+
+    char url[320];
+    buildVoiceStoryTtsWavApiUrl(url, sizeof(url), storyId);
+    if (url[0] == '\0') {
+        snprintf(story_reader_status, sizeof(story_reader_status), "Set Content URL first");
+        return false;
+    }
+
+    char path[80];
+    snprintf(path, sizeof(path), "%s/tts.wav", dirPath);
+    if (SD.exists(path)) SD.remove(path);
+
+    char status[96];
+    snprintf(story_reader_status, sizeof(story_reader_status), "下载语音WAV...");
+    Serial.printf("Downloading story TTS WAV %ld: %s -> %s\n", (long)storyId, url, path);
+    if (!httpDownloadToSdFile(url, path, status, sizeof(status), 180000)) {
+        Serial.printf("Story TTS WAV download failed: %s\n", status);
+        snprintf(story_reader_status, sizeof(story_reader_status), "%s", status);
+        if (SD.exists(path)) SD.remove(path);
+        return false;
+    }
+    if (!isValidAudioFile(path)) {
+        snprintf(story_reader_status, sizeof(story_reader_status), "Invalid WAV audio");
+        if (SD.exists(path)) SD.remove(path);
+        return false;
+    }
+
+    snprintf(audioPath, audioPathSize, "%s", path);
+    return true;
+}
+
 static bool prepareAndStartStoryAudio(int32_t storyId)
 {
+    if (serviceHomeAbortTouch()) return false;
     char audioPath[128];
     audioPath[0] = '\0';
 
@@ -7248,14 +7490,20 @@ static bool prepareAndStartStoryAudio(int32_t storyId)
     // selecting or replaying voice stories.
     stopAudioPlayback();
 
-    // Prefer already-cached audio, then server-generated MP3.  Local ESP-TTS
-    // is retained only as an offline fallback because it needs a large task
-    // stack and contiguous internal heap on the ESP32-S3.
+    // Prefer already-cached audio, then server-generated MP3, then the
+    // server's WAV TTS endpoint.  The WAV fallback is important because the
+    // reference server has both /tts.mp3 and /tts; if online MP3 generation is
+    // blocked or slow, selecting a story should still fetch TTS and play it.
+    // Local ESP-TTS is retained only as the final offline fallback because it
+    // needs contiguous internal heap on the ESP32-S3.
     if (!loadStoryAudioFromSd(storyId, audioPath, sizeof(audioPath)) &&
         !downloadStoryAudioToSd(storyId, audioPath, sizeof(audioPath)) &&
+        !downloadStoryWavAudioToSd(storyId, audioPath, sizeof(audioPath)) &&
         !synthesizeStoryTtsToSd(storyId, selected_story_content.c_str(), audioPath, sizeof(audioPath))) {
+        Serial.printf("No playable TTS audio available for story %ld\n", (long)storyId);
         return false;
     }
+    if (homeAbortRequested) return false;
     bool ok = startAudioPlayback(audioPath);
     snprintf(story_reader_status, sizeof(story_reader_status), "%s", ok ? "正在播放" : "Play failed");
     return ok;
@@ -7411,6 +7659,7 @@ static bool loadSavedStoriesFromSd()
 
 static bool fetchVoiceStoryLibrary()
 {
+    if (serviceHomeAbortTouch()) return false;
     if (WiFi.status() != WL_CONNECTED) {
         if (loadSavedStoriesFromSd()) {
             story_total = story_count;
@@ -7421,6 +7670,7 @@ static bool fetchVoiceStoryLibrary()
     }
 
     warmupContentServer();
+    if (homeAbortRequested) return false;
 
     StoryListItem fetched_items[MAX_STORY_ITEMS];
     int fetched_count = 0;
@@ -7439,9 +7689,10 @@ static bool fetchVoiceStoryLibrary()
         snprintf(story_library_status, sizeof(story_library_status), "Stories try %d/3...", attempt);
         Serial.printf("Fetching voice story library (try %d/3): %s\n", attempt, url);
         loaded = httpGetString(url, payload, story_library_status, sizeof(story_library_status), 20000);
+        if (homeAbortRequested) return false;
         if (!loaded && attempt < 3) {
             WiFiClient().stop();
-            delay(1200);
+            if (abortableDelay(1200)) return false;
         }
     }
     if (!loaded) {
@@ -7490,6 +7741,7 @@ static bool fetchVoiceStoryLibrary()
 
 static bool fetchSelectedVoiceStory(int32_t storyId)
 {
+    if (serviceHomeAbortTouch()) return false;
     if (loadStoryFromSd(storyId, selected_story_title, selected_story_author, selected_story_category, &selected_story_content)) {
         selected_story_id = storyId;
         story_reader_page = 0;
@@ -7505,6 +7757,7 @@ static bool fetchSelectedVoiceStory(int32_t storyId)
     }
 
     warmupContentServer();
+    if (homeAbortRequested) return false;
 
     char url[320];
     buildVoiceStoryDetailApiUrl(url, sizeof(url), storyId);
@@ -7519,9 +7772,10 @@ static bool fetchSelectedVoiceStory(int32_t storyId)
         snprintf(story_reader_status, sizeof(story_reader_status), "Story try %d/3...", attempt);
         Serial.printf("Fetching selected voice story (try %d/3): %s\n", attempt, url);
         loaded = httpGetString(url, payload, story_reader_status, sizeof(story_reader_status), 20000);
+        if (homeAbortRequested) return false;
         if (!loaded && attempt < 3) {
             WiFiClient().stop();
-            delay(1200);
+            if (abortableDelay(1200)) return false;
         }
     }
     if (!loaded) {
@@ -7552,11 +7806,13 @@ static bool fetchSelectedVoiceStory(int32_t storyId)
 
 static bool fetchAndSaveStoryItem(StoryListItem &story)
 {
+    if (serviceHomeAbortTouch()) return false;
     if (WiFi.status() != WL_CONNECTED || story.id <= 0) {
         return false;
     }
 
     warmupContentServer();
+    if (homeAbortRequested) return false;
 
     char url[320];
     buildVoiceStoryDetailApiUrl(url, sizeof(url), story.id);
@@ -7570,9 +7826,10 @@ static bool fetchAndSaveStoryItem(StoryListItem &story)
     for (int attempt = 1; attempt <= 3 && !loaded; ++attempt) {
         Serial.printf("Saving story %ld in background (try %d/3): %s\n", (long)story.id, attempt, url);
         loaded = httpGetString(url, payload, status, sizeof(status), 20000);
+        if (homeAbortRequested) return false;
         if (!loaded && attempt < 3) {
             WiFiClient().stop();
-            delay(1200);
+            if (abortableDelay(1200)) return false;
         }
     }
     if (!loaded) {
@@ -7678,6 +7935,7 @@ static void buildMusicDetailApiUrl(char *out, size_t outSize, int32_t songId)
 
 static bool fetchMusicLibrary()
 {
+    if (serviceHomeAbortTouch()) return false;
     if (WiFi.status() != WL_CONNECTED) {
         if (loadSavedMusicFromSd()) {
             music_total = music_count;
@@ -7687,6 +7945,7 @@ static bool fetchMusicLibrary()
         return false;
     }
     warmupContentServer();
+    if (homeAbortRequested) return false;
     int fetched_count = 0;
     char url[320];
     buildMusicApiUrl(url, sizeof(url));
@@ -7700,7 +7959,8 @@ static bool fetchMusicLibrary()
         snprintf(music_library_status, sizeof(music_library_status), "Songs try %d/3...", attempt);
         Serial.printf("Fetching music library (try %d/3): %s\n", attempt, url);
         loaded = httpGetString(url, payload, music_library_status, sizeof(music_library_status), 8000);
-        if (!loaded && attempt < 3) { WiFiClient().stop(); delay(1200); }
+        if (homeAbortRequested) return false;
+        if (!loaded && attempt < 3) { WiFiClient().stop(); if (abortableDelay(1200)) return false; }
     }
     if (!loaded) return false;
     JsonDocument doc;
@@ -7979,6 +8239,7 @@ static void serviceAudioPlayback()
 
 static bool saveMusicToSd(int32_t songId, const char *title, const char *filename, const char *audioUrl, const char *source)
 {
+    if (serviceHomeAbortTouch()) return false;
     if (songId <= 0 || !ensureSdReady()) return false;
     if (!audioUrl || audioUrl[0] == '\0') return false;
 
@@ -8030,6 +8291,7 @@ static bool saveMusicToSd(int32_t songId, const char *title, const char *filenam
 
 static bool fetchAndSaveMusicItem(MusicListItem &song)
 {
+    if (serviceHomeAbortTouch()) return false;
     if (song.id <= 0) return false;
     if (song.saved || loadMusicFromSd(song.id, song.title, song.filename, song.audio_url, song.source)) {
         song.saved = true;
@@ -8054,6 +8316,7 @@ static bool fetchAndSaveMusicItem(MusicListItem &song)
     snprintf(selected_music_source, sizeof(selected_music_source), "%s", song.source);
     selected_music_url[0] = '\0';
     if (fetchSelectedMusic(song.id)) {
+        if (homeAbortRequested) return false;
         // fetchSelectedMusic() already performs the online detail fetch,
         // downloads the MP3 to /music/<id>/, and reloads selected_music_url as
         // the local SD path. Do not call saveMusicToSd() a second time with
@@ -8076,6 +8339,7 @@ static bool fetchAndSaveMusicItem(MusicListItem &song)
 
 static bool fetchSelectedMusic(int32_t songId)
 {
+    if (serviceHomeAbortTouch()) return false;
     if (loadMusicFromSd(songId, selected_music_title, selected_music_filename, selected_music_url, selected_music_source)) {
         selected_music_id = songId;
         snprintf(music_player_status, sizeof(music_player_status), "Loaded from SD");
@@ -8087,6 +8351,7 @@ static bool fetchSelectedMusic(int32_t songId)
         return false;
     }
     warmupContentServer();
+    if (homeAbortRequested) return false;
     char url[320];
     buildMusicDetailApiUrl(url, sizeof(url), songId);
     if (url[0] == '\0') {
@@ -8099,7 +8364,8 @@ static bool fetchSelectedMusic(int32_t songId)
         snprintf(music_player_status, sizeof(music_player_status), "Song try %d/3...", attempt);
         Serial.printf("Fetching selected song (try %d/3): %s\n", attempt, url);
         loaded = httpGetString(url, payload, music_player_status, sizeof(music_player_status), 20000);
-        if (!loaded && attempt < 3) { WiFiClient().stop(); delay(1200); }
+        if (homeAbortRequested) return false;
+        if (!loaded && attempt < 3) { WiFiClient().stop(); if (abortableDelay(1200)) return false; }
     }
     if (!loaded) return false;
     JsonDocument doc;
@@ -8127,6 +8393,7 @@ static bool fetchSelectedMusic(int32_t songId)
         snprintf(music_player_status, sizeof(music_player_status), "Save failed");
         return false;
     }
+    if (homeAbortRequested) return false;
     if (!loadMusicFromSd(selected_music_id, selected_music_title, selected_music_filename, selected_music_url, selected_music_source)) {
         snprintf(music_player_status, sizeof(music_player_status), "SD load failed");
         return false;
@@ -8156,6 +8423,7 @@ static bool handleMusicPlayerTouch(int16_t tx, int16_t ty)
         music_player_status[0] = '\0';
         refreshMusicPlayerHeaderArea();
         if (selected_music_id > 0 && fetchSelectedMusic(selected_music_id)) {
+            if (homeAbortRequested) return true;
             music_playing = startAudioPlayback(selected_music_url);
             snprintf(music_player_status, sizeof(music_player_status), "%s", music_playing ? "正在播放" : "Play failed");
         }
