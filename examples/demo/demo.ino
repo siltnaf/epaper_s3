@@ -41,11 +41,19 @@
 #include <AudioGeneratorWAV.h>
 #include <AudioOutputI2S.h>
 #include <esp_sntp.h>
+#include <esp_heap_caps.h>
 #if USE_LOCAL_ESP_TTS
 extern "C" {
 #include "esp_tts.h"
 #include "esp_tts_voice_xiaole.h"
 }
+extern const esp_tts_voice_t esp_tts_voice_template;
+#else
+// Arduino's .ino preprocessor can emit prototypes for functions that are
+// inside #if USE_LOCAL_ESP_TTS blocks before it evaluates the preprocessor
+// guard. Keep the type known when local TTS is disabled; the guarded ESP-TTS
+// code is still excluded from the final build.
+typedef void *esp_tts_handle_t;
 #endif
 #include "utilities.h"
 #include "calc_key_icons.h"
@@ -187,6 +195,9 @@ static constexpr int AUDIO_I2S_BCLK_PIN = 39;
 static constexpr int AUDIO_I2S_LRCK_PIN = 48;
 static constexpr int AUDIO_I2S_DOUT_PIN = 45;
 static constexpr int AUDIO_I2S_MIC_DIN_PIN = 10;
+static constexpr size_t LOCAL_TTS_TASK_STACK_BYTES = 32768;
+static constexpr size_t LOCAL_TTS_MIN_INTERNAL_FREE_BYTES = 96 * 1024;
+static constexpr size_t LOCAL_TTS_MIN_INTERNAL_LARGEST_BLOCK_BYTES = 48 * 1024;
 AudioGeneratorMP3 *audioMp3 = nullptr;
 AudioGeneratorWAV *audioWav = nullptr;
 AudioFileSourceSD *audioFile = nullptr;
@@ -6888,18 +6899,57 @@ static void buildVoiceStoryTtsApiUrl(char *out, size_t outSize, int32_t storyId)
     out[0] = '\0';
     if (storyId <= 0) return;
     char endpoint[64];
-    snprintf(endpoint, sizeof(endpoint), "/api/voice-stories/%ld/tts", (long)storyId);
+    snprintf(endpoint, sizeof(endpoint), "/api/voice-stories/%ld/tts.mp3", (long)storyId);
     buildContentApiUrl(out, outSize, endpoint, NULL);
+}
+
+static bool isValidAudioFile(const char *path)
+{
+    if (!path || path[0] == '\0' || !ensureSdReady() || !SD.exists(path)) return false;
+    File file = SD.open(path, FILE_READ);
+    if (!file) return false;
+    const size_t size = file.size();
+    uint8_t header[12] = {0};
+    const size_t n = file.read(header, sizeof(header));
+    file.close();
+
+    if (size < 1024 || n < 4) return false;
+
+    // WAV: RIFF....WAVE
+    if (n >= 12 && memcmp(header, "RIFF", 4) == 0 && memcmp(header + 8, "WAVE", 4) == 0) return true;
+    // MP3: ID3 tag or MPEG frame sync 0xFFE/0xFFF
+    if (memcmp(header, "ID3", 3) == 0) return true;
+    if (header[0] == 0xFF && (header[1] & 0xE0) == 0xE0) return true;
+
+    Serial.printf("Invalid audio cache file: %s, size=%u, header=%02X %02X %02X %02X\n",
+                  path, (unsigned)size, header[0], header[1], header[2], header[3]);
+    return false;
 }
 
 static bool loadStoryAudioFromSd(int32_t storyId, char *audioPath, size_t audioPathSize)
 {
     if (!audioPath || audioPathSize == 0 || !ensureSdReady() || storyId <= 0) return false;
-    char path[80];
-    snprintf(path, sizeof(path), "%s/%ld/tts.wav", STORY_SD_FOLDER, (long)storyId);
-    if (!SD.exists(path)) return false;
-    snprintf(audioPath, audioPathSize, "%s", path);
-    return true;
+    char mp3Path[80];
+    snprintf(mp3Path, sizeof(mp3Path), "%s/%ld/tts.mp3", STORY_SD_FOLDER, (long)storyId);
+    if (SD.exists(mp3Path)) {
+        if (isValidAudioFile(mp3Path)) {
+            snprintf(audioPath, audioPathSize, "%s", mp3Path);
+            return true;
+        }
+        SD.remove(mp3Path);
+    }
+
+    // Backward compatibility: older firmware cached local/server WAV files.
+    char wavPath[80];
+    snprintf(wavPath, sizeof(wavPath), "%s/%ld/tts.wav", STORY_SD_FOLDER, (long)storyId);
+    if (SD.exists(wavPath)) {
+        if (isValidAudioFile(wavPath)) {
+            snprintf(audioPath, audioPathSize, "%s", wavPath);
+            return true;
+        }
+        SD.remove(wavPath);
+    }
+    return false;
 }
 
 static void writeLe16(File &file, uint16_t value)
@@ -6940,6 +6990,24 @@ static bool writeWavHeader(File &file, uint32_t dataBytes, uint32_t sampleRate, 
     return true;
 }
 
+#if USE_LOCAL_ESP_TTS
+static bool localTtsHeapLooksSafe()
+{
+    const size_t freeInternal = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
+    const size_t largestInternal = heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL);
+    Serial.printf("Local TTS heap check: free_internal=%u largest_internal=%u\n",
+                  (unsigned)freeInternal,
+                  (unsigned)largestInternal);
+
+    if (freeInternal < LOCAL_TTS_MIN_INTERNAL_FREE_BYTES ||
+        largestInternal < LOCAL_TTS_MIN_INTERNAL_LARGEST_BLOCK_BYTES) {
+        snprintf(story_reader_status, sizeof(story_reader_status), "TTS heap low");
+        Serial.println("Skipping local ESP-TTS: not enough contiguous internal heap");
+        return false;
+    }
+    return true;
+}
+
 static bool appendTtsChunkToWav(esp_tts_handle_t ttsHandle, const char *chunk, File &wavFile, uint32_t *dataBytes)
 {
     if (!ttsHandle || !chunk || chunk[0] == '\0' || !dataBytes) {
@@ -6967,9 +7035,8 @@ static bool appendTtsChunkToWav(esp_tts_handle_t ttsHandle, const char *chunk, F
     return true;
 }
 
-static bool synthesizeStoryTtsToSd(int32_t storyId, const char *text, char *audioPath, size_t audioPathSize)
+static bool synthesizeStoryTtsToSd_internal(int32_t storyId, const char *text, char *audioPath, size_t audioPathSize)
 {
-#if USE_LOCAL_ESP_TTS
     if (!audioPath || audioPathSize == 0 || storyId <= 0 || !text || text[0] == '\0' || !ensureSdReady()) {
         return false;
     }
@@ -6990,7 +7057,21 @@ static bool synthesizeStoryTtsToSd(int32_t storyId, const char *text, char *audi
     snprintf(story_reader_status, sizeof(story_reader_status), "本机语音生成...");
     Serial.printf("Generating local esp-tts WAV for story %ld -> %s\n", (long)storyId, path);
 
-    esp_tts_voice_t *ttsVoice = esp_tts_voice_set_init(&esp_tts_voice_xiaole, NULL);
+    // Espressif's esp-tts reference initializes the voice from a template plus
+    // a voice-data pointer, usually mapped from a model partition:
+    //   esp_tts_voice_set_init(&esp_tts_voice_template, voicedata)
+    // Our bundled libvoice_set_xiaole.a embeds the xiaole voice-data pointer in
+    // esp_tts_voice_xiaole.data, so pass that data explicitly instead of NULL.
+    // Passing NULL can make esp_tts_voice_set_init() create an invalid voice set
+    // and crash later when parse/play dereferences voice->data.
+    void *xiaoleVoiceData = (void *)esp_tts_voice_xiaole.data;
+    if (!xiaoleVoiceData) {
+        snprintf(story_reader_status, sizeof(story_reader_status), "TTS data missing");
+        Serial.println("Local ESP-TTS xiaole voice data pointer is NULL");
+        return false;
+    }
+
+    esp_tts_voice_t *ttsVoice = esp_tts_voice_set_init(&esp_tts_voice_template, xiaoleVoiceData);
     if (!ttsVoice) {
         snprintf(story_reader_status, sizeof(story_reader_status), "TTS voice failed");
         return false;
@@ -7068,6 +7149,41 @@ static bool synthesizeStoryTtsToSd(int32_t storyId, const char *text, char *audi
     Serial.printf("Local esp-tts WAV generated: %s, %lu bytes PCM, %lu Hz\n", path, (unsigned long)dataBytes, (unsigned long)sampleRate);
     snprintf(audioPath, audioPathSize, "%s", path);
     return true;
+}
+
+struct TtsTaskParams {
+    int32_t storyId;
+    const char *text;
+    char *audioPath;
+    size_t audioPathSize;
+    bool success;
+    SemaphoreHandle_t sem;
+};
+
+static void synthesizeStoryTtsTask(void *pvParameters)
+{
+    TtsTaskParams *params = (TtsTaskParams *)pvParameters;
+    params->success = synthesizeStoryTtsToSd_internal(params->storyId, params->text, params->audioPath, params->audioPathSize);
+    xSemaphoreGive(params->sem);
+    vTaskDelete(NULL);
+    // FreeRTOS tasks must not return; vTaskDelete handles termination.
+    for (;;) { vTaskDelay(portMAX_DELAY); }
+}
+#endif
+
+static bool synthesizeStoryTtsToSd(int32_t storyId, const char *text, char *audioPath, size_t audioPathSize)
+{
+#if USE_LOCAL_ESP_TTS
+    if (!localTtsHeapLooksSafe()) {
+        return false;
+    }
+
+    // Run synthesis synchronously.  The earlier helper task consumed a large
+    // 32 KB internal stack and added a pointer-lifetime boundary around text
+    // and audioPath.  The official esp-tts sample runs parse/play directly;
+    // appendTtsChunkToWav() yields with delay(1), so watchdog/idle tasks still
+    // get time while long stories are synthesized.
+    return synthesizeStoryTtsToSd_internal(storyId, text, audioPath, audioPathSize);
 #else
     (void)storyId;
     (void)text;
@@ -7099,15 +7215,20 @@ static bool downloadStoryAudioToSd(int32_t storyId, char *audioPath, size_t audi
     }
 
     char path[80];
-    snprintf(path, sizeof(path), "%s/tts.wav", dirPath);
+    snprintf(path, sizeof(path), "%s/tts.mp3", dirPath);
     if (SD.exists(path)) SD.remove(path);
 
     char status[96];
-    snprintf(story_reader_status, sizeof(story_reader_status), "生成离线语音...");
-    Serial.printf("Downloading story TTS WAV %ld: %s -> %s\n", (long)storyId, url, path);
+    snprintf(story_reader_status, sizeof(story_reader_status), "下载在线语音...");
+    Serial.printf("Downloading story TTS MP3 %ld: %s -> %s\n", (long)storyId, url, path);
     if (!httpDownloadToSdFile(url, path, status, sizeof(status), 180000)) {
         Serial.printf("Story TTS download failed: %s\n", status);
         snprintf(story_reader_status, sizeof(story_reader_status), "%s", status);
+        if (SD.exists(path)) SD.remove(path);
+        return false;
+    }
+    if (!isValidAudioFile(path)) {
+        snprintf(story_reader_status, sizeof(story_reader_status), "Invalid audio");
         if (SD.exists(path)) SD.remove(path);
         return false;
     }
@@ -7119,8 +7240,20 @@ static bool downloadStoryAudioToSd(int32_t storyId, char *audioPath, size_t audi
 static bool prepareAndStartStoryAudio(int32_t storyId)
 {
     char audioPath[128];
-    if (!synthesizeStoryTtsToSd(storyId, selected_story_content.c_str(), audioPath, sizeof(audioPath)) &&
-        !downloadStoryAudioToSd(storyId, audioPath, sizeof(audioPath))) {
+    audioPath[0] = '\0';
+
+    // Stop the old decoder before fetching/generating the next story audio.
+    // Keeping ESP8266Audio decoder objects alive while HTTP/TTS/SD work runs
+    // increases internal-heap pressure and was a likely reset trigger when
+    // selecting or replaying voice stories.
+    stopAudioPlayback();
+
+    // Prefer already-cached audio, then server-generated MP3.  Local ESP-TTS
+    // is retained only as an offline fallback because it needs a large task
+    // stack and contiguous internal heap on the ESP32-S3.
+    if (!loadStoryAudioFromSd(storyId, audioPath, sizeof(audioPath)) &&
+        !downloadStoryAudioToSd(storyId, audioPath, sizeof(audioPath)) &&
+        !synthesizeStoryTtsToSd(storyId, selected_story_content.c_str(), audioPath, sizeof(audioPath))) {
         return false;
     }
     bool ok = startAudioPlayback(audioPath);

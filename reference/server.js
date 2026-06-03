@@ -316,6 +316,57 @@ $synth.Dispose()
   });
 }
 
+function splitTtsText(text, maxLen = 180) {
+  const input = normalizeTtsText(text);
+  const chunks = [];
+  let buf = '';
+  for (const ch of input) {
+    if ((buf + ch).length >= maxLen || (buf.length > 40 && /[。！？；,.!?;]/.test(ch))) {
+      if (buf.trim()) chunks.push(buf.trim());
+      buf = '';
+    }
+    buf += ch;
+  }
+  if (buf.trim()) chunks.push(buf.trim());
+  return chunks;
+}
+
+async function synthesizeOnlineMp3(text, outPath) {
+  const chunks = splitTtsText(text);
+  if (chunks.length === 0) throw new Error('No TTS text');
+
+  const tmpPath = outPath + '.tmp';
+  const ws = fs.createWriteStream(tmpPath);
+  try {
+    for (let i = 0; i < chunks.length; i++) {
+      const url = 'https://translate.google.com/translate_tts?ie=UTF-8&client=tw-ob&tl=zh-CN&q=' + encodeURIComponent(chunks[i]);
+      console.log(`Online TTS MP3 chunk ${i + 1}/${chunks.length}, ${chunks[i].length} chars`);
+      const response = await fetch(url, {
+        headers: {
+          'User-Agent': 'Mozilla/5.0',
+          'Accept': 'audio/mpeg,*/*'
+        }
+      });
+      if (!response.ok) throw new Error(`Online TTS HTTP ${response.status}`);
+      const contentType = response.headers.get('content-type') || '';
+      if (!/audio|mpeg|mp3|octet-stream/i.test(contentType)) {
+        throw new Error(`Online TTS returned ${contentType || 'unknown content type'}`);
+      }
+      const data = Buffer.from(await response.arrayBuffer());
+      if (data.length < 128) throw new Error('Online TTS returned too little audio data');
+      ws.write(data);
+    }
+  } finally {
+    await new Promise(resolve => ws.end(resolve));
+  }
+
+  if (!fs.existsSync(tmpPath) || fs.statSync(tmpPath).size < 1024) {
+    if (fs.existsSync(tmpPath)) fs.unlinkSync(tmpPath);
+    throw new Error('Online TTS MP3 generation failed');
+  }
+  fs.renameSync(tmpPath, outPath);
+}
+
 // API: Offline TTS WAV for one voice story.  The file is generated once and
 // cached locally, so repeated ESP32 requests do not re-synthesize the story.
 app.get('/api/voice-stories/:id/tts', async (req, res) => {
@@ -340,6 +391,33 @@ app.get('/api/voice-stories/:id/tts', async (req, res) => {
   } catch (err) {
     console.error('Voice story TTS failed:', err);
     res.status(500).json({ error: 'Offline TTS failed: ' + err.message });
+  }
+});
+
+// API: Online TTS MP3 for ESP32 playback.  This avoids relying on Windows-only
+// System.Speech on the server and lets the device cache/play the result from SD.
+app.get('/api/voice-stories/:id/tts.mp3', async (req, res) => {
+  try {
+    const { rows } = await pool.query('SELECT id, title, content FROM voice_stories WHERE id = $1', [req.params.id]);
+    if (rows.length === 0) return res.status(404).json({ error: 'Voice story not found' });
+
+    const story = rows[0];
+    const text = normalizeTtsText(`${story.title || ''}. ${story.content || ''}`);
+    if (!text) return res.status(400).json({ error: 'Story has no text to synthesize' });
+
+    const hash = crypto.createHash('sha1').update(`${story.id}\n${text}\nonline-mp3-v1`).digest('hex').slice(0, 16);
+    const mp3Path = path.join(ttsCacheDir, `voice-story-${story.id}-${hash}.mp3`);
+    if (!fs.existsSync(mp3Path)) {
+      console.log(`Generating online TTS MP3 for voice story ${story.id}: ${mp3Path}`);
+      await synthesizeOnlineMp3(text, mp3Path);
+    }
+
+    res.setHeader('Content-Type', 'audio/mpeg');
+    res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
+    res.sendFile(mp3Path);
+  } catch (err) {
+    console.error('Voice story online TTS failed:', err);
+    res.status(500).json({ error: 'Online TTS failed: ' + err.message });
   }
 });
 
