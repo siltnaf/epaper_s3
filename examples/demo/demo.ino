@@ -42,12 +42,14 @@
 #include <AudioOutputI2S.h>
 #include <esp_sntp.h>
 #include <esp_heap_caps.h>
+#include <esp_partition.h>
+#include <esp_idf_version.h>
 #if USE_LOCAL_ESP_TTS
 extern "C" {
 #include "esp_tts.h"
 #include "esp_tts_voice_xiaole.h"
+#include "esp_tts_voice_template.h"
 }
-extern const esp_tts_voice_t esp_tts_voice_template;
 #else
 // Arduino's .ino preprocessor can emit prototypes for functions that are
 // inside #if USE_LOCAL_ESP_TTS blocks before it evaluates the preprocessor
@@ -206,7 +208,16 @@ static const char *STARTUP_TTS_PROMPT_PINYIN = "a1 sang1 da2";
 static constexpr int32_t VOICE_STORY_ENTRY_PROMPT_ID = 900001;
 static const char *VOICE_STORY_ENTRY_PROMPT_TEXT = "讲故事";
 static constexpr int32_t SETTINGS_TTS_TEST_PROMPT_ID = 900002;
-static const char *SETTINGS_TTS_TEST_PROMPT_TEXT = "阿桑达";
+static const char *SETTINGS_TTS_TEST_PROMPT_TEXT = "阿桑達";
+#if USE_LOCAL_ESP_TTS
+static const void *localTtsMappedVoiceData = NULL;
+static const esp_partition_t *localTtsVoicePartition = NULL;
+#if ESP_IDF_VERSION >= ESP_IDF_VERSION_VAL(5, 0, 0)
+static esp_partition_mmap_handle_t localTtsVoiceMmapHandle = 0;
+#else
+static spi_flash_mmap_handle_t localTtsVoiceMmapHandle = 0;
+#endif
+#endif
 AudioGeneratorMP3 *audioMp3 = nullptr;
 AudioGeneratorWAV *audioWav = nullptr;
 AudioFileSourceSD *audioFile = nullptr;
@@ -2358,6 +2369,14 @@ static bool handleSettingsMenuTouch(int16_t tx, int16_t ty)
         }
     }
 
+    // Settings pages can start/stop audio/TTS, so make the top-left Home
+    // status icon an explicit immediate escape here instead of depending only
+    // on the outer processTouchRelease() routing.
+    if (pointInRect(px, py, 0, 0, 88, TOP_STATUS_BAR_H)) {
+        enterHomeImmediately();
+        return true;
+    }
+
     // Menu Item 1: Content URL (Y=190)
     if (pointInRect(px, py, 34, 190, 472, 90)) {
         showingSettingsMenu = false;
@@ -2416,6 +2435,11 @@ static bool handleContentSettingsTouch(int16_t tx, int16_t ty)
         if (!portraitPointFromTouch(tx, ty, &px, &py, false)) {
             return false;
         }
+    }
+
+    if (pointInRect(px, py, 0, 0, 88, TOP_STATUS_BAR_H)) {
+        enterHomeImmediately();
+        return true;
     }
 
     if (pointInRect(px, py, 34, 230, 226, 60)) {
@@ -2522,6 +2546,11 @@ static bool handleSettingsTouch(int16_t tx, int16_t ty)
         if (!portraitPointFromTouch(tx, ty, &px, &py, false)) {
             return false;
         }
+    }
+
+    if (pointInRect(px, py, 0, 0, 88, TOP_STATUS_BAR_H)) {
+        enterHomeImmediately();
+        return true;
     }
 
     if (!show_password_prompt) {
@@ -5912,10 +5941,6 @@ static void processTouchRelease(int16_t startX, int16_t startY, int16_t endX, in
         if (touchHitsVoiceStoryTile(x, y)) {
             pressedHomeIcon = 3;
             refreshDisplay(drawPortraitHome);
-            // Start the spoken prompt immediately after the voice-story icon
-            // press feedback, before the slower page transition / HTTP fetch.
-            playVoiceStoryEntryPrompt();
-            serviceAudioUntilIdle(2500);
             wipeHomeIconArea(3);
             pressedHomeIcon = 0;
             showingVoiceStoryLibrary = true;
@@ -5923,6 +5948,12 @@ static void processTouchRelease(int16_t startX, int16_t startY, int16_t endX, in
             story_count = 0;
             story_total = 0;
             story_current_page = 1;
+            // Enter the voice-story page first so the Home icon / Button1 can
+            // abort the slow HTTP path.  Do not wait for the spoken "讲故事"
+            // prompt here: blocking on audio before the page exists made the
+            // UI appear hung after the prompt finished.
+            refreshDisplayExtended(drawVoiceStoryLibraryScreen, true, 80);
+            playVoiceStoryEntryPrompt();
             if (WiFi.status() != WL_CONNECTED) {
                 memset(framebuffer, 0xFF, EPD_WIDTH * EPD_HEIGHT / 2);
                 drawTopStatusBar();
@@ -5931,7 +5962,7 @@ static void processTouchRelease(int16_t startX, int16_t startY, int16_t endX, in
                 epd_clear();
                 epd_draw_grayscale_image(epd_full_screen(), framebuffer);
                 epd_poweroff();
-                delay(2000);
+                abortableDelay(2000);
             }
             fetchVoiceStoryLibrary();
             refreshDisplay(drawVoiceStoryLibraryScreen);
@@ -7319,40 +7350,117 @@ static bool localTtsVoiceLooksUsable(const esp_tts_voice_t *voice)
     return true;
 }
 
+static const void *getLocalTtsPartitionVoiceData()
+{
+    if (localTtsMappedVoiceData) {
+        return localTtsMappedVoiceData;
+    }
+
+    localTtsVoicePartition = esp_partition_find_first(ESP_PARTITION_TYPE_DATA,
+                                                      ESP_PARTITION_SUBTYPE_ANY,
+                                                      "voice_data");
+    if (!localTtsVoicePartition) {
+        Serial.println("Local ESP-TTS voice_data partition not found");
+        snprintf(story_reader_status, sizeof(story_reader_status), "TTS partition missing");
+        return NULL;
+    }
+
+    Serial.printf("Local ESP-TTS voice_data partition: addr=0x%lx size=%lu subtype=0x%x\n",
+                  (unsigned long)localTtsVoicePartition->address,
+                  (unsigned long)localTtsVoicePartition->size,
+                  (unsigned)localTtsVoicePartition->subtype);
+
+    esp_err_t err;
+#if ESP_IDF_VERSION >= ESP_IDF_VERSION_VAL(5, 0, 0)
+    err = esp_partition_mmap(localTtsVoicePartition,
+                             0,
+                             localTtsVoicePartition->size,
+                             ESP_PARTITION_MMAP_DATA,
+                             &localTtsMappedVoiceData,
+                             &localTtsVoiceMmapHandle);
+#else
+    err = esp_partition_mmap(localTtsVoicePartition,
+                             0,
+                             localTtsVoicePartition->size,
+                             SPI_FLASH_MMAP_DATA,
+                             &localTtsMappedVoiceData,
+                             &localTtsVoiceMmapHandle);
+#endif
+    if (err != ESP_OK || !localTtsMappedVoiceData) {
+        Serial.printf("Local ESP-TTS voice_data mmap failed: %d\n", (int)err);
+        snprintf(story_reader_status, sizeof(story_reader_status), "TTS mmap failed");
+        localTtsMappedVoiceData = NULL;
+        return NULL;
+    }
+
+    Serial.printf("Local ESP-TTS voice_data mapped at %p\n", localTtsMappedVoiceData);
+    return localTtsMappedVoiceData;
+}
+
 static esp_tts_voice_t *createLocalTtsVoiceSet()
 {
     // Follow Espressif's esp-tts model flow:
     //   1. Use the common voice template/dictionary metadata.
     //   2. Bind it to the Xiaole voice data with esp_tts_voice_set_init().
     //   3. Pass the resulting voice set to esp_tts_create().
-    // In this Arduino-linked library, esp_tts_voice_xiaole is the voice-data
-    // object while esp_tts_voice_template carries the parser metadata.
-    if (!localTtsVoiceLooksUsable(&esp_tts_voice_template)) {
-        snprintf(story_reader_status, sizeof(story_reader_status), "TTS voice bad");
-        return NULL;
+    // The reference3 ESP-TTS sample maps a "voice_data" partition and passes
+    // that raw data pointer to esp_tts_voice_set_init(&esp_tts_voice_template,
+    // voicedata). In this Arduino build, libvoice_set_xiaole.a exposes the
+    // bundled voice-data object as esp_tts_voice_xiaole. Its `data` member is
+    // the closest equivalent to the reference sample's `voicedata` pointer.
+    // Do NOT validate esp_tts_voice_template before initialization: the
+    // template intentionally lacks the runtime voice-data pointers until it is
+    // combined with Xiaole data by esp_tts_voice_set_init().
+    const void *partitionVoiceData = getLocalTtsPartitionVoiceData();
+    if (partitionVoiceData) {
+        esp_tts_voice_t *voice = esp_tts_voice_set_init(&esp_tts_voice_template, (void *)partitionVoiceData);
+        if (localTtsVoiceLooksUsable(voice)) {
+            Serial.printf("Local ESP-TTS voice initialized from voice_data partition: name=%s format=%s sample_rate=%d bit_width=%d\n",
+                          voice->voice_name ? voice->voice_name : "?",
+                          voice->format ? voice->format : "?",
+                          voice->sample_rate,
+                          voice->bit_width);
+            return voice;
+        }
+        if (voice) {
+            esp_tts_voice_set_free(voice);
+        }
+        Serial.println("Local ESP-TTS partition voice init failed; falling back to linked object");
     }
 
-    esp_tts_voice_t *voice = esp_tts_voice_set_init(&esp_tts_voice_template, (void *)&esp_tts_voice_xiaole);
-    if (voice) {
-        Serial.printf("Local ESP-TTS voice initialized: name=%s format=%s sample_rate=%d bit_width=%d\n",
-                      voice->voice_name ? voice->voice_name : "?",
-                      voice->format ? voice->format : "?",
-                      voice->sample_rate,
-                      voice->bit_width);
-        return voice;
-    }
+    Serial.printf("Local ESP-TTS Xiaole object: data=%p sample_rate=%d sylls=%p syll_pos=%p pinyin_idx=%p\n",
+                  esp_tts_voice_xiaole.data,
+                  esp_tts_voice_xiaole.sample_rate,
+                  esp_tts_voice_xiaole.sylls,
+                  esp_tts_voice_xiaole.syll_pos,
+                  esp_tts_voice_xiaole.pinyin_idx);
 
-    // Some esp-tts library revisions expose the actual syllable data through
-    // the voice object's data field. Fall back to that pointer if available.
+    esp_tts_voice_t *voice = NULL;
     if (esp_tts_voice_xiaole.data) {
-        Serial.println("Local ESP-TTS object-data init failed; retrying with Xiaole data pointer");
         voice = esp_tts_voice_set_init(&esp_tts_voice_template, (void *)esp_tts_voice_xiaole.data);
     }
 
+    // Fallback for library revisions where the exported object itself is the
+    // accepted voice-data pointer.
     if (!voice) {
-        snprintf(story_reader_status, sizeof(story_reader_status), "TTS voice failed");
-        Serial.println("Local ESP-TTS voice initialization failed");
+        Serial.println("Local ESP-TTS data-pointer init failed; retrying with Xiaole object pointer");
+        voice = esp_tts_voice_set_init(&esp_tts_voice_template, (void *)&esp_tts_voice_xiaole);
     }
+
+    if (!localTtsVoiceLooksUsable(voice)) {
+        if (voice) {
+            esp_tts_voice_set_free(voice);
+        }
+        snprintf(story_reader_status, sizeof(story_reader_status), "TTS voice failed");
+        Serial.println("Local ESP-TTS initialized voice is unusable");
+        return NULL;
+    }
+
+    Serial.printf("Local ESP-TTS voice initialized: name=%s format=%s sample_rate=%d bit_width=%d\n",
+                  voice->voice_name ? voice->voice_name : "?",
+                  voice->format ? voice->format : "?",
+                  voice->sample_rate,
+                  voice->bit_width);
     return voice;
 }
 
@@ -7741,11 +7849,12 @@ static bool playVoiceStoryEntryPrompt()
     char audioPath[128];
     audioPath[0] = '\0';
 
-    if (!synthesizeStoryTtsToSd(VOICE_STORY_ENTRY_PROMPT_ID,
-                                VOICE_STORY_ENTRY_PROMPT_TEXT,
-                                audioPath,
-                                sizeof(audioPath))) {
-        Serial.println("Voice story entry prompt TTS unavailable");
+    // Never synthesize this prompt from the Home -> Voice Story path.  Local
+    // ESP-TTS can take time and use contiguous internal heap; doing that in a
+    // navigation handler can make the UI look stuck.  Startup/settings may
+    // cache this file, but if it is absent we simply skip the prompt.
+    if (!loadStoryAudioFromSd(VOICE_STORY_ENTRY_PROMPT_ID, audioPath, sizeof(audioPath))) {
+        Serial.println("Voice story entry prompt cache unavailable; skipping prompt");
         return false;
     }
 
@@ -8782,6 +8891,18 @@ void buttonPressed(Button2 &b)
 {
     Serial.println("Button1 Pressed!");
     pressed_cnt++;
+
+    // Physical Button1 is the reliable global Home/Back escape.  The GT911
+    // touch transform can vary between panels/orientations, so do not depend
+    // only on tapping the drawn top-left Home icon when audio/TTS or network
+    // work has just run.
+    if (showingClock || showingCalculator || showingSettings || showingSettingsMenu ||
+        showingContentSettings || showingBookLibrary || showingBookReader ||
+        showingVoiceStoryLibrary || showingVoiceStoryReader || showingMusicLibrary ||
+        showingMusicPlayer || showingSdMenu || showingSdFolder) {
+        homeAbortRequested = true;
+        enterHomeImmediately();
+    }
 }
 
 
@@ -8868,11 +8989,11 @@ void setup()
     drawPortraitStartup();
     epd_draw_grayscale_image(epd_full_screen(), framebuffer);
     epd_poweroff();
-    if (playStartupTtsPrompt()) {
-        serviceAudioUntilIdle(3000);
-    } else {
-        delay(3000);
-    }
+    // Do not run ESP-TTS synthesis during boot. If voice-data init/parsing has
+    // a problem, doing it here can trap the device in a reset loop before the
+    // UI becomes usable. Local TTS is tested explicitly from Settings -> TTS
+    // Test instead, after boot has completed.
+    delay(3000);
 
     epd_poweron();
     // Wipe out "Asundar" with white color. To prevent/remove any ghost image, we do multiple white wipes (pulses) to thoroughly clear the screen without doing a harsh black flash.
@@ -8925,10 +9046,8 @@ void setup()
 
     epd_poweroff();
 
-    // Generate/cache the very short voice-story entry prompt while the device
-    // is idle at startup. Later button taps can then play the cached WAV
-    // immediately instead of trying to synthesize during touch handling.
-    cacheVoiceStoryEntryPrompt();
+    // Do not pre-cache TTS during startup; keep boot safe and test/generate
+    // TTS only from explicit user actions after the home screen is available.
 
     // Set the button callback function
     btn.setPressedHandler(buttonPressed);
