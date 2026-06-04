@@ -201,6 +201,10 @@ static constexpr int AUDIO_I2S_MIC_DIN_PIN = 10;
 static constexpr size_t LOCAL_TTS_TASK_STACK_BYTES = 32768;
 static constexpr size_t LOCAL_TTS_MIN_INTERNAL_FREE_BYTES = 96 * 1024;
 static constexpr size_t LOCAL_TTS_MIN_INTERNAL_LARGEST_BLOCK_BYTES = 48 * 1024;
+// ESP-TTS parse/play can run long enough on large Chinese segments to trip the
+// ESP32-S3 task watchdog.  Keep local Chinese chunks intentionally small so
+// each parse/stream cycle returns to Arduino/FreeRTOS frequently.
+static constexpr size_t LOCAL_TTS_CHINESE_CHUNK_BYTES = 64;
 static constexpr int32_t STARTUP_TTS_PROMPT_ID = 900000;
 static const char *STARTUP_TTS_PROMPT_TEXT = "Asunda";
 static const char *STARTUP_TTS_PROMPT_FALLBACK_TEXT = "阿桑达";
@@ -369,6 +373,7 @@ static void refreshBookReaderContentArea();
 static void refreshVoiceStoryLibraryListArea();
 static void refreshVoiceStoryReaderContentArea();
 static void refreshVoiceStoryPlayerHeaderArea();
+static void refreshVoiceStoryPlayPauseButtonArea();
 static void refreshMusicLibraryListArea();
 static void refreshMusicPlayerHeaderArea();
 static void refreshVoiceStorySaveIconArea(int storyIndex);
@@ -401,6 +406,7 @@ static void buildMusicDetailApiUrl(char *out, size_t outSize, int32_t songId);
 static bool buildMusicAudioDownloadUrl(const char *audioUrl, char *out, size_t outSize);
 static bool handleMusicPlayerTouch(int16_t tx, int16_t ty);
 static bool synthesizeStoryTtsToSd(int32_t storyId, const char *text, char *audioPath, size_t audioPathSize);
+static bool streamStoryTtsToSpeaker(int32_t storyId, const char *text);
 static bool writeWavHeader(File &file, uint32_t dataBytes, uint32_t sampleRate, uint16_t channels, uint16_t bitsPerSample);
 static void buildBookDetailApiUrl(char *out, size_t outSize, int32_t bookId);
 static void buildVoiceStoryDetailApiUrl(char *out, size_t outSize, int32_t storyId);
@@ -2138,15 +2144,6 @@ static void drawSettingsMenuScreen()
     portraitFillCircle(knobX, sliderY, 17, 0x00);
     portraitFillCircle(knobX, sliderY, 9, 0xFF);
 
-    // Menu Item 5: TTS hardware/test button.  This is intentionally on the
-    // Settings page so repeated taps can verify local ESP-TTS + I2S output
-    // without rebooting the device.
-    int item5Y = 684;
-    portraitFillRect(34, item5Y, 472, 90, 0xFF);
-    portraitDrawRect(34, item5Y, 472, 90, 0x00);
-    portraitDrawRect(36, item5Y + 2, 468, 86, 0x00);
-    drawPortraitTextInRectCentered("TTS Test", 34, item5Y, 260, 90, (GFXfont *)&FiraSans);
-    drawUtf8ChineseTextInRectSingleWidth(SETTINGS_TTS_TEST_PROMPT_TEXT, 282, item5Y + 18, 180, 54);
 }
 
 static void toggleWifi()
@@ -2414,13 +2411,6 @@ static bool handleSettingsMenuTouch(int16_t tx, int16_t ty)
         saveAudioVolume();
         applyAudioVolume();
         refreshDisplay(drawSettingsMenuScreen);
-        return true;
-    }
-
-    // Menu Item 5: TTS Test (Y=684).  Every press attempts to generate and
-    // play "阿桑达" so local TTS can be tested repeatedly from Settings.
-    if (pointInRect(px, py, 34, 684, 472, 90)) {
-        playSettingsTtsTestPrompt();
         return true;
     }
 
@@ -3322,6 +3312,34 @@ static void refreshVoiceStoryPlayerHeaderArea()
     free(headerBuffer);
 }
 
+static void refreshVoiceStoryPlayPauseButtonArea()
+{
+    // Redraw only the voice-story play/pause control after a tap.  The full
+    // header partial refresh can be too broad/weak on this e-paper panel and
+    // leave the old play triangle or pause bars visible.  A tight button-area
+    // white pre-drive followed by normal grayscale drawing makes the icon
+    // toggle visibly between Play and Pause immediately.
+    drawVoiceStoryPlayerHeader();
+
+    const int32_t margin = 8;
+    Rect_t buttonArea = portraitRectToPhysicalRect(STORY_PLAYER_BUTTON_X - margin,
+                                                   STORY_PLAYER_BUTTON_Y - margin,
+                                                   STORY_PLAYER_BUTTON_W + margin * 2,
+                                                   STORY_PLAYER_BUTTON_H + margin * 2);
+    uint8_t *buttonBuffer = copyPhysicalAreaFromFramebuffer(buttonArea);
+    if (!buttonBuffer) {
+        return;
+    }
+
+    epd_poweron();
+    epd_push_pixels(buttonArea, 60, 1);
+    epd_push_pixels(buttonArea, 60, 1);
+    epd_push_pixels(buttonArea, 60, 1);
+    epd_draw_grayscale_image(buttonArea, buttonBuffer);
+    epd_poweroff();
+    free(buttonBuffer);
+}
+
 static bool handleVoiceStoryReaderTouch(int16_t tx, int16_t ty)
 {
     int32_t px = 0;
@@ -3361,7 +3379,7 @@ static bool handleVoiceStoryReaderTouch(int16_t tx, int16_t ty)
         if (homeAbortRequested) return true;
     }
     snprintf(story_reader_status, sizeof(story_reader_status), "%s", story_playing ? "正在播放" : "已暂停");
-    refreshVoiceStoryPlayerHeaderArea();
+    refreshVoiceStoryPlayPauseButtonArea();
     return true;
 }
 
@@ -5285,6 +5303,9 @@ static bool touchHitsHomeStatusIcon(int16_t tx, int16_t ty)
 
 static bool serviceHomeAbortTouch()
 {
+    // Always poll physical button during any wait/abort loop or wait state
+    btn.loop();
+
     if (homeAbortRequested) {
         return true;
     }
@@ -5295,7 +5316,7 @@ static bool serviceHomeAbortTouch()
     int16_t tx = 0;
     int16_t ty = 0;
     if (touch.getPoint(&tx, &ty, 1) && touchHitsHomeStatusIcon(tx, ty)) {
-        Serial.println("Home abort requested");
+        Serial.println("Home abort requested via touch");
         homeAbortRequested = true;
         stopAudioPlayback(true);
         story_playing = false;
@@ -5948,12 +5969,14 @@ static void processTouchRelease(int16_t startX, int16_t startY, int16_t endX, in
             story_count = 0;
             story_total = 0;
             story_current_page = 1;
-            // Enter the voice-story page first so the Home icon / Button1 can
-            // abort the slow HTTP path.  Do not wait for the spoken "讲故事"
-            // prompt here: blocking on audio before the page exists made the
-            // UI appear hung after the prompt finished.
+            snprintf(story_library_status, sizeof(story_library_status), "Loading stories...");
+
+            // Enter the voice-story page first with a loading status, then
+            // fetch the configured Content URL immediately. Do not start the
+            // spoken entry prompt here: audio before/during the HTTP fetch can
+            // make the UI appear stuck on the placeholder text instead of
+            // loading and drawing the story list.
             refreshDisplayExtended(drawVoiceStoryLibraryScreen, true, 80);
-            playVoiceStoryEntryPrompt();
             if (WiFi.status() != WL_CONNECTED) {
                 memset(framebuffer, 0xFF, EPD_WIDTH * EPD_HEIGHT / 2);
                 drawTopStatusBar();
@@ -5965,7 +5988,7 @@ static void processTouchRelease(int16_t startX, int16_t startY, int16_t endX, in
                 abortableDelay(2000);
             }
             fetchVoiceStoryLibrary();
-            refreshDisplay(drawVoiceStoryLibraryScreen);
+            refreshDisplayExtended(drawVoiceStoryLibraryScreen, true, 80);
             touch_loop_interval = millis() + 300;
             return;
         }
@@ -6357,6 +6380,21 @@ static void buildBookDetailApiUrl(char *out, size_t outSize, int32_t bookId)
     }
 }
 
+static void serialPrintContentPayloadPreview(const char *label, const String &payload)
+{
+    const char *safeLabel = label ? label : "HTTP";
+    Serial.printf("[%s] return data length: %u bytes\n", safeLabel, (unsigned)payload.length());
+    Serial.printf("[%s] return data preview begin --------\n", safeLabel);
+    const size_t previewLen = min((size_t)payload.length(), (size_t)1200);
+    for (size_t i = 0; i < previewLen; ++i) {
+        Serial.write((uint8_t)payload[i]);
+    }
+    if (payload.length() > previewLen) {
+        Serial.printf("\n[%s] ... truncated, total=%u bytes\n", safeLabel, (unsigned)payload.length());
+    }
+    Serial.printf("\n[%s] return data preview end ----------\n", safeLabel);
+}
+
 static void buildContentApiUrl(char *out, size_t outSize, const char *endpoint, const char *query)
 {
     if (!out || outSize == 0) {
@@ -6391,6 +6429,14 @@ static void buildContentApiUrl(char *out, size_t outSize, const char *endpoint, 
     }
 
     snprintf(out, outSize, "%s%s%s", origin, endpoint, query ? query : "");
+    Serial.printf("[Content URL] base='%s' saved='%s' input='%s' origin='%s' endpoint='%s' query='%s' -> request='%s'\n",
+                  base,
+                  saved_content_url,
+                  content_url_input,
+                  origin,
+                  endpoint,
+                  query ? query : "",
+                  out);
 }
 
 static bool httpGetString(const char *url, String &payload, char *status, size_t statusSize, uint32_t timeoutMs)
@@ -6408,7 +6454,12 @@ static bool httpGetString(const char *url, String &payload, char *status, size_t
         return false;
     }
 
-    Serial.printf("HTTP GET: %s\n", url);
+    Serial.printf("[HTTP] process=start method=GET url=%s timeout=%lu wifi=%d ip=%s heap=%u\n",
+                  url,
+                  (unsigned long)timeoutMs,
+                  (int)WiFi.status(),
+                  WiFi.localIP().toString().c_str(),
+                  (unsigned)ESP.getFreeHeap());
     HTTPClient http;
     http.setTimeout(timeoutMs);
     http.setConnectTimeout(8000);
@@ -6438,6 +6489,7 @@ static bool httpGetString(const char *url, String &payload, char *status, size_t
         return false;
     }
     int httpCode = http.GET();
+    Serial.printf("[HTTP] process=response code=%d url=%s\n", httpCode, url);
     if (serviceHomeAbortTouch()) {
         http.end();
         if (status && statusSize > 0) snprintf(status, statusSize, "Home abort");
@@ -6454,6 +6506,7 @@ static bool httpGetString(const char *url, String &payload, char *status, size_t
 
     payload = http.getString();
     http.end();
+    serialPrintContentPayloadPreview("HTTP", payload);
     if (abortableDelay(80)) {
         if (status && statusSize > 0) snprintf(status, statusSize, "Home abort");
         return false;
@@ -6561,13 +6614,19 @@ static bool httpDownloadToSdFile(const char *url, const char *path, char *status
 
 static bool waitForWifiReady(uint32_t timeoutMs)
 {
+    Serial.printf("[WiFi] waitForWifiReady start timeout=%lu status=%d ip=%s\n",
+                  (unsigned long)timeoutMs,
+                  (int)WiFi.status(),
+                  WiFi.localIP().toString().c_str());
     uint32_t start = millis();
     while (WiFi.status() != WL_CONNECTED && millis() - start < timeoutMs) {
         if (abortableDelay(100)) {
+            Serial.println("[WiFi] waitForWifiReady aborted by Home");
             return false;
         }
     }
     if (WiFi.status() != WL_CONNECTED) {
+        Serial.printf("[WiFi] waitForWifiReady failed status=%d\n", (int)WiFi.status());
         return false;
     }
 
@@ -6578,6 +6637,7 @@ static bool waitForWifiReady(uint32_t timeoutMs)
             return false;
         }
     }
+    Serial.printf("[WiFi] ready ip=%s rssi=%d\n", WiFi.localIP().toString().c_str(), WiFi.RSSI());
     return true;
 }
 
@@ -7214,6 +7274,27 @@ static void buildVoiceStoryTtsApiUrl(char *out, size_t outSize, int32_t storyId)
     buildContentApiUrl(out, outSize, endpoint, NULL);
 }
 
+static void serialPrintTextPreview(const char *label, const char *text, size_t maxBytes)
+{
+    const char *safeLabel = label ? label : "Text";
+    if (!text) {
+        Serial.printf("[%s] text is NULL\n", safeLabel);
+        return;
+    }
+
+    const size_t len = strlen(text);
+    Serial.printf("[%s] text length: %u bytes\n", safeLabel, (unsigned)len);
+    Serial.printf("[%s] text preview begin --------\n", safeLabel);
+    const size_t previewLen = min(len, maxBytes);
+    for (size_t i = 0; i < previewLen; ++i) {
+        Serial.write((uint8_t)text[i]);
+    }
+    if (len > previewLen) {
+        Serial.printf("\n[%s] ... truncated, total=%u bytes\n", safeLabel, (unsigned)len);
+    }
+    Serial.printf("\n[%s] text preview end ----------\n", safeLabel);
+}
+
 static void buildVoiceStoryTtsWavApiUrl(char *out, size_t outSize, int32_t storyId)
 {
     if (!out || outSize == 0) return;
@@ -7273,20 +7354,20 @@ static bool loadStoryAudioFromSd(int32_t storyId, char *audioPath, size_t audioP
     return false;
 }
 
-static void writeLe16(File &file, uint16_t value)
+static bool writeLe16(File &file, uint16_t value)
 {
     uint8_t b[2] = {(uint8_t)(value & 0xFF), (uint8_t)((value >> 8) & 0xFF)};
-    file.write(b, sizeof(b));
+    return file.write(b, sizeof(b)) == sizeof(b);
 }
 
-static void writeLe32(File &file, uint32_t value)
+static bool writeLe32(File &file, uint32_t value)
 {
     uint8_t b[4] = {
         (uint8_t)(value & 0xFF),
         (uint8_t)((value >> 8) & 0xFF),
         (uint8_t)((value >> 16) & 0xFF),
         (uint8_t)((value >> 24) & 0xFF)};
-    file.write(b, sizeof(b));
+    return file.write(b, sizeof(b)) == sizeof(b);
 }
 
 static bool writeWavHeader(File &file, uint32_t dataBytes, uint32_t sampleRate, uint16_t channels, uint16_t bitsPerSample)
@@ -7295,19 +7376,19 @@ static bool writeWavHeader(File &file, uint32_t dataBytes, uint32_t sampleRate, 
     const uint32_t byteRate = sampleRate * channels * bitsPerSample / 8;
     const uint16_t blockAlign = channels * bitsPerSample / 8;
 
-    file.write((const uint8_t *)"RIFF", 4);
-    writeLe32(file, 36 + dataBytes);
-    file.write((const uint8_t *)"WAVE", 4);
-    file.write((const uint8_t *)"fmt ", 4);
-    writeLe32(file, 16);
-    writeLe16(file, 1); // PCM
-    writeLe16(file, channels);
-    writeLe32(file, sampleRate);
-    writeLe32(file, byteRate);
-    writeLe16(file, blockAlign);
-    writeLe16(file, bitsPerSample);
-    file.write((const uint8_t *)"data", 4);
-    writeLe32(file, dataBytes);
+    if (file.write((const uint8_t *)"RIFF", 4) != 4) return false;
+    if (!writeLe32(file, 36 + dataBytes)) return false;
+    if (file.write((const uint8_t *)"WAVE", 4) != 4) return false;
+    if (file.write((const uint8_t *)"fmt ", 4) != 4) return false;
+    if (!writeLe32(file, 16)) return false;
+    if (!writeLe16(file, 1)) return false; // PCM
+    if (!writeLe16(file, channels)) return false;
+    if (!writeLe32(file, sampleRate)) return false;
+    if (!writeLe32(file, byteRate)) return false;
+    if (!writeLe16(file, blockAlign)) return false;
+    if (!writeLe16(file, bitsPerSample)) return false;
+    if (file.write((const uint8_t *)"data", 4) != 4) return false;
+    if (!writeLe32(file, dataBytes)) return false;
     return true;
 }
 
@@ -7466,10 +7547,55 @@ static esp_tts_voice_t *createLocalTtsVoiceSet()
 
 static bool espTtsParseText(esp_tts_handle_t ttsHandle, const char *text, LocalTtsParseMode mode)
 {
+    // Give idle/WiFi/watchdog housekeeping a chance before entering the
+    // closed-source ESP-TTS parser.  Long story synthesis calls this many
+    // times; without explicit yields, TG1WDT_SYS_RST can occur mid-story.
+    yield();
+    delay(1);
+    bool ok = false;
     if (mode == LOCAL_TTS_PARSE_PINYIN) {
-        return esp_tts_parse_pinyin(ttsHandle, text) == 1;
+        ok = esp_tts_parse_pinyin(ttsHandle, text) == 1;
+    } else {
+        ok = esp_tts_parse_chinese(ttsHandle, text) == 1;
     }
-    return esp_tts_parse_chinese(ttsHandle, text) == 1;
+    yield();
+    delay(1);
+    return ok;
+}
+
+static bool appendCodepointToTtsChunk(char *chunk, size_t chunkSize, size_t *chunkLen, const char *cpStart, const char *cpEnd, uint32_t cp)
+{
+    if (!chunk || !chunkLen || !cpStart || !cpEnd || cpEnd <= cpStart || chunkSize == 0) {
+        return false;
+    }
+
+    // ESP-TTS is sensitive to malformed/non-speech input.  The story payloads
+    // observed on-device contain replacement/malformed characters in the
+    // serial preview (`�`).  Drop those plus invisible controls before calling
+    // esp_tts_parse_chinese(); otherwise parsing can stall right after the
+    // "ESP Chinese TTS" banner and no WAV is completed.
+    if (cp == 0xFFFD || cp == 0xFEFF || cp == 0x200B || cp == 0x200C || cp == 0x200D) {
+        return false;
+    }
+    if (cp < 0x20 && cp != '\n' && cp != '\r' && cp != '\t') {
+        return false;
+    }
+
+    // utf8NextCodepoint() returns '?' for malformed bytes.  Real question
+    // punctuation is not essential to speech generation, so dropping '?' is a
+    // safe way to avoid feeding malformed byte placeholders into ESP-TTS.
+    if (cp == '?') {
+        return false;
+    }
+
+    size_t cpBytes = (size_t)(cpEnd - cpStart);
+    if (*chunkLen + cpBytes >= chunkSize - 1) {
+        return false;
+    }
+    memcpy(chunk + *chunkLen, cpStart, cpBytes);
+    *chunkLen += cpBytes;
+    chunk[*chunkLen] = '\0';
+    return true;
 }
 
 static bool appendParsedTtsStreamToWav(esp_tts_handle_t ttsHandle, File &wavFile, uint32_t *dataBytes)
@@ -7503,7 +7629,7 @@ static bool appendParsedTtsStreamToWav(esp_tts_handle_t ttsHandle, File &wavFile
         const size_t bytes = (size_t)len * sizeof(short);
         size_t written = wavFile.write((const uint8_t *)pcm, bytes);
         if (written != bytes) {
-            Serial.printf("TTS WAV write short: expected=%u written=%u\n", (unsigned)bytes, (unsigned)written);
+            Serial.printf("TTS WAV write short: expected=%u written=%u — SD write failure, aborting synthesis\n", (unsigned)bytes, (unsigned)written);
             esp_tts_stream_reset(ttsHandle);
             return false;
         }
@@ -7524,6 +7650,11 @@ static bool appendTtsTextToWav(esp_tts_handle_t ttsHandle, const char *text, Loc
         return false;
     }
 
+    Serial.printf("[VoiceStory TTS] parsing %s segment bytes=%u preview=%.48s\n",
+                  mode == LOCAL_TTS_PARSE_PINYIN ? "pinyin" : "chinese",
+                  (unsigned)strlen(text),
+                  text);
+
     if (!espTtsParseText(ttsHandle, text, mode)) {
         Serial.printf("esp_tts_parse_%s failed for text: %.64s\n",
                       mode == LOCAL_TTS_PARSE_PINYIN ? "pinyin" : "chinese",
@@ -7533,6 +7664,195 @@ static bool appendTtsTextToWav(esp_tts_handle_t ttsHandle, const char *text, Loc
     }
 
     return appendParsedTtsStreamToWav(ttsHandle, wavFile, dataBytes);
+}
+
+static bool appendParsedTtsStreamToSpeaker(esp_tts_handle_t ttsHandle, uint32_t *sampleCount)
+{
+    if (!ttsHandle || !audioOut || !sampleCount) {
+        return false;
+    }
+
+    const uint32_t samplesBefore = *sampleCount;
+
+    // Stream ESP-TTS PCM directly to the MAX98357A over I2S.  This is the
+    // voice-story runtime path: no MP3/WAV URL is requested from the server and
+    // no generated .wav file is needed for selected story playback.
+    while (true) {
+        if (serviceHomeAbortTouch()) {
+            esp_tts_stream_reset(ttsHandle);
+            return false;
+        }
+
+        int len = 0;
+        short *pcm = esp_tts_stream_play(ttsHandle, &len, 4);
+        if (len <= 0) {
+            break;
+        }
+        if (!pcm) {
+            Serial.println("esp_tts_stream_play returned NULL speaker PCM with non-zero length");
+            esp_tts_stream_reset(ttsHandle);
+            return false;
+        }
+
+        for (int i = 0; i < len; ++i) {
+            if (serviceHomeAbortTouch()) {
+                esp_tts_stream_reset(ttsHandle);
+                return false;
+            }
+
+            int16_t sample[2] = {pcm[i], pcm[i]};
+            while (audioOut && !audioOut->ConsumeSample(sample)) {
+                if (serviceHomeAbortTouch()) {
+                    esp_tts_stream_reset(ttsHandle);
+                    return false;
+                }
+                delay(1);
+            }
+            ++(*sampleCount);
+        }
+        delay(1);
+    }
+
+    esp_tts_stream_reset(ttsHandle);
+    return *sampleCount > samplesBefore;
+}
+
+static bool appendTtsTextToSpeaker(esp_tts_handle_t ttsHandle, const char *text, LocalTtsParseMode mode, uint32_t *sampleCount)
+{
+    if (serviceHomeAbortTouch()) {
+        return false;
+    }
+    if (!ttsHandle || !text || text[0] == '\0' || !sampleCount) {
+        return false;
+    }
+
+    if (!espTtsParseText(ttsHandle, text, mode)) {
+        Serial.printf("esp_tts_parse_%s failed for speaker text: %.64s\n",
+                      mode == LOCAL_TTS_PARSE_PINYIN ? "pinyin" : "chinese",
+                      text);
+        esp_tts_stream_reset(ttsHandle);
+        return false;
+    }
+
+    return appendParsedTtsStreamToSpeaker(ttsHandle, sampleCount);
+}
+
+static bool streamTtsToSpeakerOfficial(int32_t storyId, const char *text, LocalTtsParseMode mode)
+{
+    if (serviceHomeAbortTouch()) return false;
+    if (storyId <= 0 || !text || text[0] == '\0') {
+        snprintf(story_reader_status, sizeof(story_reader_status), "No story text");
+        return false;
+    }
+
+    snprintf(story_reader_status, sizeof(story_reader_status), "本机语音播放...");
+    Serial.printf("Streaming local esp-tts PCM for id %ld using %s parser\n",
+                  (long)storyId,
+                  mode == LOCAL_TTS_PARSE_PINYIN ? "pinyin" : "chinese");
+
+    esp_tts_voice_t *ttsVoice = createLocalTtsVoiceSet();
+    if (!ttsVoice) {
+        return false;
+    }
+
+    esp_tts_handle_t ttsHandle = esp_tts_create(ttsVoice);
+    if (!ttsHandle) {
+        esp_tts_voice_set_free(ttsVoice);
+        snprintf(story_reader_status, sizeof(story_reader_status), "TTS init failed");
+        return false;
+    }
+
+    stopAudioPlayback();
+    initAudioOutput();
+    if (!audioOut) {
+        esp_tts_destroy(ttsHandle);
+        esp_tts_voice_set_free(ttsVoice);
+        snprintf(story_reader_status, sizeof(story_reader_status), "I2S init failed");
+        return false;
+    }
+
+    const uint32_t sampleRate = ttsVoice->sample_rate > 0 ? (uint32_t)ttsVoice->sample_rate : 16000;
+    const uint16_t bitsPerSample = ttsVoice->bit_width > 0 ? (uint16_t)ttsVoice->bit_width : 16;
+    audioOut->SetRate((int)sampleRate);
+    audioOut->SetBitsPerSample((int)bitsPerSample);
+    audioOut->SetChannels(2);
+    applyAudioVolume();
+    if (!audioOut->begin()) {
+        esp_tts_destroy(ttsHandle);
+        esp_tts_voice_set_free(ttsVoice);
+        snprintf(story_reader_status, sizeof(story_reader_status), "I2S begin failed");
+        return false;
+    }
+    snprintf(current_audio_path, sizeof(current_audio_path), "local-tts-pcm:%ld", (long)storyId);
+
+    uint32_t sampleCount = 0;
+    bool generatedAny = false;
+
+    if (mode == LOCAL_TTS_PARSE_PINYIN) {
+        generatedAny = appendTtsTextToSpeaker(ttsHandle, text, mode, &sampleCount);
+    } else {
+        const char *p = text;
+        char chunk[LOCAL_TTS_CHINESE_CHUNK_BYTES];
+        size_t chunkLen = 0;
+
+        while (*p) {
+            if (serviceHomeAbortTouch()) {
+                esp_tts_destroy(ttsHandle);
+                esp_tts_voice_set_free(ttsVoice);
+                if (audioOut) audioOut->flush();
+                current_audio_path[0] = '\0';
+                return false;
+            }
+            const char *cpStart = p;
+            uint32_t cp = 0;
+            if (!utf8NextCodepoint(&p, &cp)) break;
+
+            bool boundary = (cp == '\n' || cp == '\r' || cp == 0x3002 || cp == 0xFF01 || cp == 0xFF1F || cp == 0xFF1B || cp == 0xFF0C || cp == 0x3001 || cp == ',' || cp == '.' || cp == '!' || cp == '?' || cp == ';');
+            if (cp == '\r') continue;
+
+            if ((size_t)(p - cpStart) + chunkLen >= sizeof(chunk) - 1) {
+                chunk[chunkLen] = '\0';
+                bool chunkOk = appendTtsTextToSpeaker(ttsHandle, chunk, mode, &sampleCount);
+                generatedAny = chunkOk || generatedAny;
+                chunkLen = 0;
+            }
+
+            if (cp != '\n') {
+                appendCodepointToTtsChunk(chunk, sizeof(chunk), &chunkLen, cpStart, p, cp);
+            }
+
+            if (boundary && chunkLen > 0) {
+                chunk[chunkLen] = '\0';
+                bool chunkOk = appendTtsTextToSpeaker(ttsHandle, chunk, mode, &sampleCount);
+                generatedAny = chunkOk || generatedAny;
+                chunkLen = 0;
+            }
+        }
+
+        if (chunkLen > 0) {
+            chunk[chunkLen] = '\0';
+            bool chunkOk = appendTtsTextToSpeaker(ttsHandle, chunk, mode, &sampleCount);
+            generatedAny = chunkOk || generatedAny;
+        }
+    }
+
+    if (audioOut) {
+        audioOut->flush();
+    }
+    esp_tts_destroy(ttsHandle);
+    esp_tts_voice_set_free(ttsVoice);
+    current_audio_path[0] = '\0';
+
+    if (!generatedAny || sampleCount == 0) {
+        snprintf(story_reader_status, sizeof(story_reader_status), "TTS failed");
+        return false;
+    }
+
+    Serial.printf("Local esp-tts PCM streamed for storyId=%ld, samples=%lu, %lu Hz\n",
+                  (long)storyId,
+                  (unsigned long)sampleCount,
+                  (unsigned long)sampleRate);
+    return true;
 }
 
 static bool synthesizeTtsToSdOfficial(int32_t storyId, const char *text, LocalTtsParseMode mode, char *audioPath, size_t audioPathSize)
@@ -7583,7 +7903,15 @@ static bool synthesizeTtsToSdOfficial(int32_t storyId, const char *text, LocalTt
 
     const uint32_t sampleRate = ttsVoice->sample_rate > 0 ? (uint32_t)ttsVoice->sample_rate : 16000;
     const uint16_t bitsPerSample = ttsVoice->bit_width > 0 ? (uint16_t)ttsVoice->bit_width : 16;
-    writeWavHeader(wavFile, 0, sampleRate, 1, bitsPerSample);
+    if (!writeWavHeader(wavFile, 0, sampleRate, 1, bitsPerSample)) {
+        Serial.println("TTS WAV header write failed before synthesis");
+        wavFile.close();
+        esp_tts_destroy(ttsHandle);
+        esp_tts_voice_set_free(ttsVoice);
+        if (SD.exists(path)) SD.remove(path);
+        snprintf(story_reader_status, sizeof(story_reader_status), "SD write failed");
+        return false;
+    }
 
     uint32_t dataBytes = 0;
     bool generatedAny = false;
@@ -7592,7 +7920,7 @@ static bool synthesizeTtsToSdOfficial(int32_t storyId, const char *text, LocalTt
         generatedAny = appendTtsTextToWav(ttsHandle, text, mode, wavFile, &dataBytes);
     } else {
         const char *p = text;
-        char chunk[520];
+        char chunk[LOCAL_TTS_CHINESE_CHUNK_BYTES];
         size_t chunkLen = 0;
 
         while (*p) {
@@ -7606,27 +7934,42 @@ static bool synthesizeTtsToSdOfficial(int32_t storyId, const char *text, LocalTt
             const char *cpStart = p;
             uint32_t cp = 0;
             if (!utf8NextCodepoint(&p, &cp)) break;
-            size_t cpBytes = (size_t)(p - cpStart);
 
             bool boundary = (cp == '\n' || cp == '\r' || cp == 0x3002 || cp == 0xFF01 || cp == 0xFF1F || cp == 0xFF1B || cp == 0xFF0C || cp == 0x3001 || cp == ',' || cp == '.' || cp == '!' || cp == '?' || cp == ';');
             if (cp == '\r') continue;
 
-            if (chunkLen + cpBytes >= sizeof(chunk) - 1) {
+            if ((size_t)(p - cpStart) + chunkLen >= sizeof(chunk) - 1) {
                 chunk[chunkLen] = '\0';
                 bool chunkOk = appendTtsTextToWav(ttsHandle, chunk, mode, wavFile, &dataBytes);
+                if (!chunkOk) {
+                    Serial.println("Aborting local TTS WAV generation after chunk write/parse failure");
+                    wavFile.close();
+                    esp_tts_destroy(ttsHandle);
+                    esp_tts_voice_set_free(ttsVoice);
+                    if (SD.exists(path)) SD.remove(path);
+                    snprintf(story_reader_status, sizeof(story_reader_status), "TTS failed");
+                    return false;
+                }
                 generatedAny = chunkOk || generatedAny;
                 chunkLen = 0;
             }
 
             if (cp != '\n') {
-                memcpy(chunk + chunkLen, cpStart, cpBytes);
-                chunkLen += cpBytes;
-                chunk[chunkLen] = '\0';
+                appendCodepointToTtsChunk(chunk, sizeof(chunk), &chunkLen, cpStart, p, cp);
             }
 
             if (boundary && chunkLen > 0) {
                 chunk[chunkLen] = '\0';
                 bool chunkOk = appendTtsTextToWav(ttsHandle, chunk, mode, wavFile, &dataBytes);
+                if (!chunkOk) {
+                    Serial.println("Aborting local TTS WAV generation after chunk write/parse failure");
+                    wavFile.close();
+                    esp_tts_destroy(ttsHandle);
+                    esp_tts_voice_set_free(ttsVoice);
+                    if (SD.exists(path)) SD.remove(path);
+                    snprintf(story_reader_status, sizeof(story_reader_status), "TTS failed");
+                    return false;
+                }
                 generatedAny = chunkOk || generatedAny;
                 chunkLen = 0;
             }
@@ -7635,12 +7978,28 @@ static bool synthesizeTtsToSdOfficial(int32_t storyId, const char *text, LocalTt
         if (chunkLen > 0) {
             chunk[chunkLen] = '\0';
             bool chunkOk = appendTtsTextToWav(ttsHandle, chunk, mode, wavFile, &dataBytes);
+            if (!chunkOk) {
+                Serial.println("Aborting local TTS WAV generation after final chunk write/parse failure");
+                wavFile.close();
+                esp_tts_destroy(ttsHandle);
+                esp_tts_voice_set_free(ttsVoice);
+                if (SD.exists(path)) SD.remove(path);
+                snprintf(story_reader_status, sizeof(story_reader_status), "TTS failed");
+                return false;
+            }
             generatedAny = chunkOk || generatedAny;
         }
     }
 
-    wavFile.seek(0);
-    writeWavHeader(wavFile, dataBytes, sampleRate, 1, bitsPerSample);
+    if (!wavFile.seek(0) || !writeWavHeader(wavFile, dataBytes, sampleRate, 1, bitsPerSample)) {
+        Serial.println("TTS WAV final header rewrite failed");
+        wavFile.close();
+        esp_tts_destroy(ttsHandle);
+        esp_tts_voice_set_free(ttsVoice);
+        if (SD.exists(path)) SD.remove(path);
+        snprintf(story_reader_status, sizeof(story_reader_status), "SD write failed");
+        return false;
+    }
     wavFile.close();
     esp_tts_destroy(ttsHandle);
     esp_tts_voice_set_free(ttsVoice);
@@ -7659,16 +8018,23 @@ static bool synthesizeTtsToSdOfficial(int32_t storyId, const char *text, LocalTt
 
 static bool synthesizeStoryTtsToSd(int32_t storyId, const char *text, char *audioPath, size_t audioPathSize)
 {
+    Serial.printf("[VoiceStory TTS] local fallback requested storyId=%ld audioPathSize=%u\n",
+                  (long)storyId,
+                  (unsigned)audioPathSize);
+    serialPrintTextPreview("VoiceStory TTS input", text, 900);
+
     // Always allow already-cached TTS audio to play, even if current internal
     // heap is too fragmented to synthesize new speech. This is important for
     // short UI prompts cached during startup, before framebuffer/audio/network
     // allocations reduce contiguous internal RAM.
     if (loadStoryAudioFromSd(storyId, audioPath, audioPathSize)) {
+        Serial.printf("[VoiceStory TTS] using cached audio for storyId=%ld path=%s\n", (long)storyId, audioPath);
         return true;
     }
 
 #if USE_LOCAL_ESP_TTS
     if (!localTtsHeapLooksSafe()) {
+        Serial.printf("[VoiceStory TTS] local ESP-TTS blocked by heap check storyId=%ld\n", (long)storyId);
         return false;
     }
 
@@ -7677,12 +8043,41 @@ static bool synthesizeStoryTtsToSd(int32_t storyId, const char *text, char *audi
     // and audioPath.  The official esp-tts sample runs parse/play directly;
     // appendTtsChunkToWav() yields with delay(1), so watchdog/idle tasks still
     // get time while long stories are synthesized.
-    return synthesizeTtsToSdOfficial(storyId, text, LOCAL_TTS_PARSE_CHINESE, audioPath, audioPathSize);
+    bool ok = synthesizeTtsToSdOfficial(storyId, text, LOCAL_TTS_PARSE_CHINESE, audioPath, audioPathSize);
+    Serial.printf("[VoiceStory TTS] local ESP-TTS result storyId=%ld ok=%d path=%s\n",
+                  (long)storyId,
+                  ok ? 1 : 0,
+                  ok ? audioPath : "");
+    return ok;
 #else
     (void)storyId;
     (void)text;
     (void)audioPath;
     (void)audioPathSize;
+    return false;
+#endif
+}
+
+static bool streamStoryTtsToSpeaker(int32_t storyId, const char *text)
+{
+    Serial.printf("[VoiceStory TTS] stream-to-speaker requested storyId=%ld\n", (long)storyId);
+    serialPrintTextPreview("VoiceStory speaker TTS input", text, 900);
+
+#if USE_LOCAL_ESP_TTS
+    if (!localTtsHeapLooksSafe()) {
+        Serial.printf("[VoiceStory TTS] speaker stream blocked by heap check storyId=%ld\n", (long)storyId);
+        return false;
+    }
+
+    bool ok = streamTtsToSpeakerOfficial(storyId, text, LOCAL_TTS_PARSE_CHINESE);
+    Serial.printf("[VoiceStory TTS] speaker stream result storyId=%ld ok=%d\n",
+                  (long)storyId,
+                  ok ? 1 : 0);
+    return ok;
+#else
+    (void)storyId;
+    (void)text;
+    snprintf(story_reader_status, sizeof(story_reader_status), "Local TTS disabled");
     return false;
 #endif
 }
@@ -7725,7 +8120,10 @@ static bool downloadStoryAudioToSd(int32_t storyId, char *audioPath, size_t audi
 {
     if (serviceHomeAbortTouch()) return false;
     if (!audioPath || audioPathSize == 0 || storyId <= 0 || !ensureSdReady()) return false;
-    if (loadStoryAudioFromSd(storyId, audioPath, audioPathSize)) return true;
+    if (loadStoryAudioFromSd(storyId, audioPath, audioPathSize)) {
+        Serial.printf("[VoiceStory TTS] using cached MP3/WAV before download storyId=%ld path=%s\n", (long)storyId, audioPath);
+        return true;
+    }
     if (WiFi.status() != WL_CONNECTED) {
         snprintf(story_reader_status, sizeof(story_reader_status), "WiFi not connected");
         return false;
@@ -7749,7 +8147,7 @@ static bool downloadStoryAudioToSd(int32_t storyId, char *audioPath, size_t audi
 
     char status[96];
     snprintf(story_reader_status, sizeof(story_reader_status), "下载在线语音...");
-    Serial.printf("Downloading story TTS MP3 %ld: %s -> %s\n", (long)storyId, url, path);
+    Serial.printf("[VoiceStory TTS] downloading server MP3 storyId=%ld url=%s -> %s\n", (long)storyId, url, path);
     if (!httpDownloadToSdFile(url, path, status, sizeof(status), 180000)) {
         Serial.printf("Story TTS download failed: %s\n", status);
         snprintf(story_reader_status, sizeof(story_reader_status), "%s", status);
@@ -7770,7 +8168,10 @@ static bool downloadStoryWavAudioToSd(int32_t storyId, char *audioPath, size_t a
 {
     if (serviceHomeAbortTouch()) return false;
     if (!audioPath || audioPathSize == 0 || storyId <= 0 || !ensureSdReady()) return false;
-    if (loadStoryAudioFromSd(storyId, audioPath, audioPathSize)) return true;
+    if (loadStoryAudioFromSd(storyId, audioPath, audioPathSize)) {
+        Serial.printf("[VoiceStory TTS] using cached MP3/WAV before WAV download storyId=%ld path=%s\n", (long)storyId, audioPath);
+        return true;
+    }
     if (WiFi.status() != WL_CONNECTED) {
         snprintf(story_reader_status, sizeof(story_reader_status), "WiFi not connected");
         return false;
@@ -7794,7 +8195,7 @@ static bool downloadStoryWavAudioToSd(int32_t storyId, char *audioPath, size_t a
 
     char status[96];
     snprintf(story_reader_status, sizeof(story_reader_status), "下载语音WAV...");
-    Serial.printf("Downloading story TTS WAV %ld: %s -> %s\n", (long)storyId, url, path);
+    Serial.printf("[VoiceStory TTS] downloading server WAV storyId=%ld url=%s -> %s\n", (long)storyId, url, path);
     if (!httpDownloadToSdFile(url, path, status, sizeof(status), 180000)) {
         Serial.printf("Story TTS WAV download failed: %s\n", status);
         snprintf(story_reader_status, sizeof(story_reader_status), "%s", status);
@@ -7817,27 +8218,63 @@ static bool prepareAndStartStoryAudio(int32_t storyId)
     char audioPath[128];
     audioPath[0] = '\0';
 
-    // Stop the old decoder before fetching/generating the next story audio.
-    // Keeping ESP8266Audio decoder objects alive while HTTP/TTS/SD work runs
-    // increases internal-heap pressure and was a likely reset trigger when
-    // selecting or replaying voice stories.
+    Serial.printf("[VoiceStory TTS] prepare start storyId=%ld selectedId=%ld title='%s' contentBytes=%u wifi=%d\n",
+                  (long)storyId,
+                  (long)selected_story_id,
+                  selected_story_title,
+                  (unsigned)selected_story_content.length(),
+                  (int)WiFi.status());
+    serialPrintTextPreview("VoiceStory selected content", selected_story_content.c_str(), 900);
+
+    // Stop the old decoder before generating/playing the next story audio.
+    // Keeping ESP8266Audio decoder objects alive while ESP-TTS/SD work runs
+    // increases internal-heap pressure and can interfere with generation.
     stopAudioPlayback();
 
-    // Prefer already-cached audio, then server-generated MP3, then the
-    // server's WAV TTS endpoint.  The WAV fallback is important because the
-    // reference server has both /tts.mp3 and /tts; if online MP3 generation is
-    // blocked or slow, selecting a story should still fetch TTS and play it.
-    // Local ESP-TTS is retained only as the final offline fallback because it
-    // needs contiguous internal heap on the ESP32-S3.
-    if (!loadStoryAudioFromSd(storyId, audioPath, sizeof(audioPath)) &&
-        !downloadStoryAudioToSd(storyId, audioPath, sizeof(audioPath)) &&
-        !downloadStoryWavAudioToSd(storyId, audioPath, sizeof(audioPath)) &&
-        !synthesizeStoryTtsToSd(storyId, selected_story_content.c_str(), audioPath, sizeof(audioPath))) {
-        Serial.printf("No playable TTS audio available for story %ld\n", (long)storyId);
+    // A selected voice story must be synthesized from the currently fetched
+    // story text.  Older firmware may already have /voice/<id>/tts.wav or
+    // tts.mp3 cached from server/download/direct-stream experiments; if we let
+    // synthesizeStoryTtsToSd() reuse those files, ESP-TTS is skipped entirely
+    // and the user hears stale/invalid/no audio.  Delete only the generated
+    // audio cache here, preserving meta.txt and content.txt for offline text.
+    if (storyId > 0 && ensureSdReady()) {
+        char stalePath[96];
+        snprintf(stalePath, sizeof(stalePath), "%s/%ld/tts.wav", STORY_SD_FOLDER, (long)storyId);
+        if (SD.exists(stalePath)) {
+            Serial.printf("[VoiceStory TTS] removing stale local WAV before regeneration: %s\n", stalePath);
+            SD.remove(stalePath);
+        }
+        snprintf(stalePath, sizeof(stalePath), "%s/%ld/tts.mp3", STORY_SD_FOLDER, (long)storyId);
+        if (SD.exists(stalePath)) {
+            Serial.printf("[VoiceStory TTS] removing stale MP3 before regeneration: %s\n", stalePath);
+            SD.remove(stalePath);
+        }
+    }
+
+    // Voice-story workflow:
+    //   1. Fetch/load the story text content from the configured Content URL
+    //      or SD cache (done before this function is called).
+    //   2. Feed that text into local ESP-TTS.
+    //   3. Write the locally generated PCM into a WAV cache on SD and play it
+    //      through the known-good ESP8266Audio WAV decoder/I2S output path.
+    //
+    // Do NOT request `/tts.mp3` or `/tts` from the server: the content server
+    // only provides story JSON/text, not pre-rendered audio files.  Direct PCM
+    // streaming through AudioOutputI2S::ConsumeSample() is not reliable on this
+    // ESP8266Audio/ESP32-S3 stack, so use the same local WAV generation path
+    // already proven by the Settings TTS test prompt.
+    if (!synthesizeStoryTtsToSd(storyId, selected_story_content.c_str(), audioPath, sizeof(audioPath))) {
+        Serial.printf("[VoiceStory TTS] local ESP-TTS generation failed for storyId=%ld\n", (long)storyId);
+        snprintf(story_reader_status, sizeof(story_reader_status), "TTS failed");
         return false;
     }
     if (homeAbortRequested) return false;
+
     bool ok = startAudioPlayback(audioPath);
+    Serial.printf("[VoiceStory TTS] local WAV playback result storyId=%ld ok=%d path=%s\n",
+                  (long)storyId,
+                  ok ? 1 : 0,
+                  audioPath);
     snprintf(story_reader_status, sizeof(story_reader_status), "%s", ok ? "正在播放" : "Play failed");
     return ok;
 }
@@ -8087,8 +8524,10 @@ static bool fetchVoiceStoryLibrary()
         return false;
     }
 
-    warmupContentServer();
-    if (homeAbortRequested) return false;
+    // Fetch the voice-story list directly from the configured Content URL.
+    // Do not run the generic content-server warmup here because it calls
+    // /api/geoip first and can leave the page sitting on the loading/status
+    // text before the actual /api/voice-stories request is attempted.
 
     StoryListItem fetched_items[MAX_STORY_ITEMS];
     int fetched_count = 0;
@@ -9007,6 +9446,7 @@ void setup()
     digitalWrite(TOUCH_INT, HIGH);
 
     Wire.begin(BOARD_SDA, BOARD_SCL);
+    Wire.setTimeOut(25); // Prevent CPU hangs inside Wire functions due to SCL/SDA glitches when speaker is used
 
     rtc.begin(Wire);
 
@@ -9063,6 +9503,10 @@ void setup()
 void loop()
 {
     serviceAudioPlayback();
+
+    // Poll physical button unconditionally right at the start of loop()
+    // so button events are never skipped or starved when touch_loop_interval is pending
+    btn.loop();
 
     processPendingBookAutoSave();
     processPendingStoryAutoSave();
